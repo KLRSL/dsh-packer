@@ -528,9 +528,11 @@ export function apply(ctx, config = {}) {
   // 1. /pack 命令（可选服务）
   registerPackCommand(ctx)
 
-  // 2. 设置页 Web API（webServer 缺失时自动跳过）
-  if (ctx.webServer?.register) {
-    ctx.effect(() => ctx.webServer.register({
+  // 2. 设置页 Web API（官方契约：ctx.webServer.register，kind=prefix；webServer 缺失时自动跳过）
+  //    注：不能直接访问 ctx.webServer —— Cordis service 未注入时 Proxy getter 抛
+  //    "cannot get property without inject"（?. 拦不住）。用 ctx.inject 懒注入：
+  ctx.inject(['webServer'], (httpCtx) => {
+    httpCtx.effect(() => httpCtx.webServer.register({
       kind: 'prefix',
       path: '/packer/api',
       handler: async (req, res) => {
@@ -609,7 +611,7 @@ export function apply(ctx, config = {}) {
         }
       },
     }), 'dsh-packer: settings web API')
-  }
+  })
 }
 
 // ---------- 测试用内部接口 ----------
