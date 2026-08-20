@@ -76,7 +76,7 @@ const MODULES = {
     share: false,
   },
   memory: {
-    label: '记忆数据（E:\\example\\memory 等）',
+    label: '记忆数据（DSH_MEMORY_ROOT 或 ~/.dsh/memory 等）',
     kind: 'dir',
     resolve: () => MEMORY_ROOT,
     default: true,

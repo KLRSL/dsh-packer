@@ -43,7 +43,7 @@ let I
 
 before(async () => {
   makeAssets()
-  const m = await import(pathToFileURL('E:/DE/projects/dsh-packer/index.mjs').href)
+  const m = await import(new URL('../index.mjs', import.meta.url).href)
   I = m.__internals
 })
 
@@ -93,7 +93,7 @@ test('隐私扫描：检测本地路径/用户名/密钥', () => {
     for (const f of I.collectModuleFiles(I.MODULES[k])) files.push(f)
   }
   const findings = I.privacyScan(files)
-  // skills/memory/SKILL.md 含 C:\Users\Example\foo → abs-path + user-path + username
+  // skills/memory/SKILL.md 含 C:\Users\Example\foo → abs-path + user-path
   assert.ok(findings.some((f) => f.file === 'memory/SKILL.md' && f.pattern === 'abs-path'))
   assert.ok(findings.some((f) => f.file === 'memory/SKILL.md' && f.pattern === 'user-path'))
   // .credentials.yaml 不应被扫描到（因为不被收集）
@@ -123,7 +123,7 @@ test('createPack：迁移模式打包成功且含 manifest', () => {
 })
 
 test('createPack：分享模式拦截隐私内容', () => {
-  // skills 含 pet/SKILL.md（大肥鱼）→ 分享模式应抛错
+  // skills 含 pet/SKILL.md（个人敏感词示例）→ 分享模式应抛错
   assert.throws(() => I.createPack({ modules: ['skills'], mode: 'share' }), /隐私扫描发现/)
 })
 
