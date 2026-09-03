@@ -42,5 +42,24 @@
   "homepage": "https://github.com/KLRSL/dsh-packer#readme",
   "bugs": {
     "url": "https://github.com/KLRSL/dsh-packer/issues"
-  }
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "packer",
+    "config",
+    "backup",
+    "zip",
+    "migration",
+    "privacy"
+  ],
+  "files": [
+    "index.mjs",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ]
 }
