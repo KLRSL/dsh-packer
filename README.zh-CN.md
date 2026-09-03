@@ -7,7 +7,9 @@
 - **迁移**——换机器或重装后，把整套环境搬过去。
 - **分享**——把 Skills 等资产交给别人。
 
-版本 **v0.1.0** · MIT License
+版本 **v0.1.2** · MIT License
+
+**v0.1.2（2026-09-03）**：设置面板 UI 现代化（与 DSH 0.1.1-rc.2 视觉风格一致）；**兼容性**：DeepSeek Harness ≥ 0.1.1-rc.2（0.1.2-rc.1 已测）。
 
 ---
 
@@ -112,7 +114,7 @@ pnpm link
 ## 兼容性
 
 - **Node.js** >= 22.19.0
-- **DSH 依赖** `@deepseek-ai/dsh-*` 0.1.0-rc.5 及以上（peer 依赖：`@deepseek-ai/cordis` ^4.0.1、`@deepseek-ai/dsh-tools`、`@deepseek-ai/dsh-session`）
+- **DSH 依赖** `@deepseek-ai/dsh-*` >= 0.1.1-rc.2（当前 latest 线；0.1.2-rc.1 已测；peer 依赖：`@deepseek-ai/cordis` ^4.0.2、`@deepseek-ai/dsh-tools` >=0.1.1-rc.2、`@deepseek-ai/dsh-session` >=0.1.1-rc.2）
 - **bsdtar**：Windows 10+ 自带 `tar.exe`（bsdtar/libarchive）；macOS 的 `tar` 即 bsdtar。不使用任何 npm 原生模块。
 
 ---

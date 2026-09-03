@@ -7,7 +7,9 @@
 - **Migration** — move your whole setup to a new machine or after a reinstall.
 - **Sharing** — hand your Skills (and other assets) to other people.
 
-Version **v0.1.0** · MIT License
+Version **v0.1.2** · MIT License
+
+**v0.1.2 (2026-09-03)**：settings panel UI modernization (visual style aligned with DSH 0.1.1-rc.2); **Compatibility**: DeepSeek Harness ≥ 0.1.1-rc.2 (tested on 0.1.2-rc.1 too).
 
 ---
 
@@ -112,7 +114,7 @@ Package notes are written at pack time and shown in the package list. In the Set
 ## Compatibility
 
 - **Node.js** >= 22.19.0
-- **DSH packages** `@deepseek-ai/dsh-*` 0.1.0-rc.5 or later (peer deps: `@deepseek-ai/cordis` ^4.0.1, `@deepseek-ai/dsh-tools`, `@deepseek-ai/dsh-session`)
+- **DSH packages** `@deepseek-ai/dsh-*` >= 0.1.1-rc.2 (current latest line; tested on 0.1.2-rc.1 too; peer deps: `@deepseek-ai/cordis` ^4.0.2, `@deepseek-ai/dsh-tools` >=0.1.1-rc.2, `@deepseek-ai/dsh-session` >=0.1.1-rc.2)
 - **bsdtar**: Windows 10+ ships `tar.exe` (bsdtar/libarchive); macOS ships bsdtar as `tar`. No npm native modules are used.
 
 ---
