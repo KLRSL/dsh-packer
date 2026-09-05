@@ -210,17 +210,34 @@ test('恢复：applyRestore skip 策略不改已存在文件', () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('恢复：applyRestore merge 策略追加不覆盖', () => {
-  const r = I.createPack({ modules: ['settings'], mode: 'migrate' })
+test('恢复：applyRestore merge 策略追加不覆盖（文本文件）', () => {
+  const r = I.createPack({ modules: ['skills'], mode: 'migrate' })
   const zipPath = path.join(I.PACKS_DIR, r.pack.name)
   const { manifest, dir } = I.readManifestFromZip(zipPath)
   manifest._dir = dir
-  fs.writeFileSync(path.join(fakeHome, 'settings.yaml'), 'original\n')
+  fs.writeFileSync(path.join(fakeHome, 'skills', 'memory', 'SKILL.md'), 'original\n')
   const stats = I.applyRestore(manifest, { strategy: 'merge' })
   assert.equal(stats.merged, 1)
-  const after = fs.readFileSync(path.join(fakeHome, 'settings.yaml'), 'utf-8')
+  const after = fs.readFileSync(path.join(fakeHome, 'skills', 'memory', 'SKILL.md'), 'utf-8')
   assert.ok(after.includes('original'))
-  assert.ok(after.includes('agent-default-model'))
+  assert.ok(after.includes('memory skill'))
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('恢复：结构化配置（YAML/JSON）拒绝 append merge（fail-closed）', () => {
+  const r = I.createPack({ modules: ['settings', 'presets'], mode: 'migrate' })
+  const { manifest, dir } = I.readManifestFromZip(path.join(I.PACKS_DIR, r.pack.name))
+  manifest._dir = dir
+  // 先修改目标文件使其内容 ≠ 包内（否则 sha 相同直接 skipped，不会走到 merge）
+  fs.writeFileSync(path.join(fakeHome, 'settings.yaml'), 'agent-default-model:\n  provider: local\n')
+  fs.writeFileSync(path.join(fakeHome, '.agent-presets', 'p1', 'preset.yml'), 'enabled: false\n')
+  const stats = I.applyRestore(manifest, { strategy: 'merge' })
+  assert.equal(stats.merged, 0)
+  assert.ok(stats.failed >= 1)
+  assert.ok(stats.failures.some((f) => /结构化|append merge/.test(f.error)))
+  // 恢复原内容，避免污染后续用例
+  fs.writeFileSync(path.join(fakeHome, 'settings.yaml'), 'agent-default-model:\n  provider: deepseek-official\n')
+  fs.writeFileSync(path.join(fakeHome, '.agent-presets', 'p1', 'preset.yml'), 'enabled: true\n')
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
@@ -228,6 +245,56 @@ test('恢复：非 packer 包报错', () => {
   const fake = path.join(tmpRoot, 'fake.zip')
   fs.writeFileSync(fake, 'not a zip')
   assert.throws(() => I.readManifestFromZip(fake))
+})
+
+test('恢复：源文件被篡改 → 完整性校验失败并拒绝（fail-closed）', () => {
+  const r = I.createPack({ modules: ['settings'], mode: 'migrate' })
+  const { manifest, dir } = I.readManifestFromZip(path.join(I.PACKS_DIR, r.pack.name))
+  manifest._dir = dir
+  // 篡改解压目录内的源文件（模拟包内容在解压后被替换/污染）
+  fs.writeFileSync(path.join(dir, 'settings', 'settings.yaml'), 'tampered: true\n')
+  const stats = I.applyRestore(manifest, { strategy: 'overwrite' })
+  assert.equal(stats.added, 0)
+  assert.equal(stats.failed, 1)
+  assert.ok(/完整性|fail-closed/.test(stats.failures[0].error))
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('恢复：清单 rel 越界（../../）被 containment 拒绝', () => {
+  const r = I.createPack({ modules: ['settings'], mode: 'migrate' })
+  const { manifest, dir } = I.readManifestFromZip(path.join(I.PACKS_DIR, r.pack.name))
+  manifest._dir = dir
+  const evil = { ...manifest, files: [{ module: 'settings', rel: '../../escape.txt', sha256: manifest.files[0].sha256 }] }
+  const stats = I.applyRestore(evil, { strategy: 'overwrite' })
+  assert.equal(stats.failed, 1)
+  assert.ok(/越界/.test(stats.failures[0].error))
+  assert.ok(!fs.existsSync(path.join(tmpRoot, 'escape.txt')))
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('pathContained：目录内通过、目录外拒绝', () => {
+  const base = path.join(tmpRoot, 'stage')
+  assert.ok(I.pathContained(base, path.join(base, 'a', 'b.txt')))
+  assert.ok(I.pathContained(base, base))
+  assert.ok(!I.pathContained(base, path.join(tmpRoot, 'other.txt')))
+  assert.ok(!I.pathContained(base, path.join(base, '..', '..', 'escape.txt')))
+})
+
+test('隐私扫描：部署者个人规则生效（合并后循环新数组）', () => {
+  I.setPersonalPatterns([{ id: 'nick', label: '个人昵称', re: '大肥鱼' }])
+  try {
+    const f = path.join(tmpRoot, 'nick.txt')
+    fs.writeFileSync(f, '我是大肥鱼，今天也是努力的一天\n')
+    const hits = I.privacyScan([{ rel: 'nick.txt', abs: f }])
+    assert.ok(hits.some((x) => x.pattern === 'nick' && x.label === '个人昵称'))
+    assert.equal(hits.length, 1) // 只命中个人规则（通用规则未命中该文本）
+    // 控制组：不含个人词 → 零发现
+    const clean = path.join(tmpRoot, 'clean.txt')
+    fs.writeFileSync(clean, '普通文本\n')
+    assert.equal(I.privacyScan([{ rel: 'clean.txt', abs: clean }]).length, 0)
+  } finally {
+    I.setPersonalPatterns([])
+  }
 })
 
 test('清单指纹：sha256 稳定', () => {

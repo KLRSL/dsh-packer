@@ -7,9 +7,16 @@
 - **Migration** — move your whole setup to a new machine or after a reinstall.
 - **Sharing** — hand your Skills (and other assets) to other people.
 
-Version **v0.1.2** · MIT License
+Version **v0.2.2** · MIT License
 
-**v0.1.2 (2026-09-03)**：settings panel UI modernization (visual style aligned with DSH 0.1.1-rc.2); **Compatibility**: DeepSeek Harness ≥ 0.1.1-rc.2 (tested on 0.1.2-rc.1 too).
+**v0.2.1 (2026-09-05)**：Config Packer panel UI rebuilt on the "skeleton / flesh / breath" design language — neutralSurface background + white cards (max-width 860 centered, radius 16), 4/8px grid spacing, restrained 150ms transitions; colors strictly from dsh-fuse default tokens (--pk-* variables, zero hardcoded hex); diff report got count badges + semantic dots (added=success / changed=warning / same+skipped=muted); privacy risks default to warning tint, error red reserved for share-mode blocking; interaction paths untouched, host tests 24/24 green.
+
+**v0.2.0 (2026-09-05)**：security hardening & fixes from code review —
+① privacy scan now actually loops the merged pattern list (deployer `personalPatterns` were silently skipped);
+② restore verifies each source file against its manifest SHA-256 before applying (**fail-closed** — mismatch is refused, not copied);
+③ restore enforces canonical path containment (zip-slip / manifest-tamper `../` is rejected);
+④ append-merge is refused for structured formats (JSON/YAML) — use overwrite or merge manually.
+**Compatibility**: DeepSeek Harness ≥ 0.1.1-rc.2.
 
 ---
 

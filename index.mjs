@@ -166,6 +166,17 @@ const PRIVACY_PATTERNS = [
 
 let PERSONAL_PATTERNS = [] // 部署者注入的个人规则：[{ label, re }]
 
+/** 部署者个人隐私规则注入（应用配置 + 测试共用） */
+export function setPersonalPatterns(list) {
+  PERSONAL_PATTERNS = Array.isArray(list)
+    ? list.map((p) => ({
+        id: String(p.id || 'personal'),
+        label: String(p.label || '个人敏感词'),
+        re: p.re instanceof RegExp ? p.re : new RegExp(String(p.re)),
+      }))
+    : []
+}
+
 function privacyScan(files) {
   const patterns = [...PRIVACY_PATTERNS, ...PERSONAL_PATTERNS]
   const findings = []
@@ -173,7 +184,7 @@ function privacyScan(files) {
     if (!isTextFile(f.rel) && !isTextFile(f.abs)) continue
     const text = readFile(f.abs)
     if (!text) continue
-    for (const pat of PRIVACY_PATTERNS) {
+    for (const pat of patterns) {
       const m = text.match(pat.re)
       if (m) {
         const line = text.split('\n').findIndex((l) => pat.re.test(l))
@@ -402,19 +413,57 @@ function diffRestore(manifest) {
   return diff
 }
 
+// 结构化配置文件：禁止通用 append merge（JSON/YAML 拼接即损坏），fail-closed 拒绝
+const STRUCTURED_EXT = new Set(['.json', '.yaml', '.yml', '.jsonl', '.toml'])
+
+function isStructuredFile(p) {
+  return STRUCTURED_EXT.has(path.extname(p).toLowerCase())
+}
+
+/** 包内路径越界检测：src 解析后必须仍在解压目录内（防 manifest/zip 被改后越界恢复） */
+function pathContained(base, target) {
+  const b = path.resolve(base)
+  const t = path.resolve(target)
+  return t === b || t.startsWith(b + path.sep)
+}
+
 function applyRestore(manifest, { strategy = 'overwrite', moduleFilter = null } = {}) {
   const stats = { overwritten: 0, added: 0, merged: 0, skipped: 0, failed: 0, failures: [] }
   for (const f of manifest.files || []) {
     if (moduleFilter && !moduleFilter.includes(f.module)) continue
     const mod = MODULES[f.module]
     if (!mod) { stats.skipped++; continue }
-    const src = path.join(manifest._dir, f.module, f.rel)
     const target = resolveTarget(mod, f.rel)
     try {
+      // 安全校验（fail-closed）：src 必须在解压目录内 + 与清单 SHA-256 一致，
+      // 防包/清单被篡改后越界恢复或恢复被替换的文件
+      const src = path.resolve(manifest._dir, f.module, f.rel)
+      if (!pathContained(manifest._dir, src)) {
+        stats.failed++
+        stats.failures.push({ rel: f.rel, error: '包内路径越界，已拒绝恢复（fail-closed）' })
+        continue
+      }
+      if (!fs.existsSync(src)) {
+        stats.failed++
+        stats.failures.push({ rel: f.rel, error: '包内源文件缺失' })
+        continue
+      }
+      const srcHash = sha256(src)
+      if (f.sha256 && srcHash !== f.sha256) {
+        stats.failed++
+        stats.failures.push({ rel: f.rel, error: `源文件完整性校验失败（${f.sha256} ≠ ${srcHash}），已拒绝恢复（fail-closed）` })
+        continue
+      }
       if (fs.existsSync(target)) {
         if (sha256(target) === f.sha256) { stats.skipped++; continue } // 相同跳过
         if (strategy === 'skip') { stats.skipped++; continue }
         if (strategy === 'merge' && isTextFile(target)) {
+          if (isStructuredFile(target)) {
+            // 结构化配置（JSON/YAML）禁用通用 append merge：拼接即坏文件
+            stats.failed++
+            stats.failures.push({ rel: f.rel, error: '结构化配置文件不支持 append merge（会破坏语法），请改用 overwrite 策略或手工合并' })
+            continue
+          }
           // 合并：追加带分隔的源内容（不覆盖）
           const sep = `\n<!-- merged from dsh-packer pack ${manifest.createdAt} -->\n`
           fs.appendFileSync(target, sep + readFile(src), 'utf-8')
@@ -518,13 +567,7 @@ function registerPackCommand(ctx) {
 
 export function apply(ctx, config = {}) {
   // 部署者个人隐私规则（如个人昵称、本机用户名）——不进开源代码，由部署者配置注入
-  if (Array.isArray(config?.personalPatterns)) {
-    PERSONAL_PATTERNS = config.personalPatterns.map((p) => ({
-      id: p.id || 'personal',
-      label: p.label || '个人敏感词',
-      re: typeof p.re === 'string' ? new RegExp(p.re) : p.re,
-    })).filter((p) => p.re instanceof RegExp)
-  }
+  if (config?.personalPatterns) setPersonalPatterns(config.personalPatterns)
   // 1. /pack 命令（可选服务）
   registerPackCommand(ctx)
 
@@ -625,6 +668,7 @@ export const __internals = {
   moduleStats,
   privacyScan,
   PRIVACY_PATTERNS,
+  setPersonalPatterns,
   createPack,
   listPacks,
   deletePack,
@@ -635,4 +679,5 @@ export const __internals = {
   buildManifest,
   sha256,
   stagingDir,
+  pathContained,
 }
