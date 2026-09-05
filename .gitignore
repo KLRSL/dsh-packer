@@ -1,0 +1,15 @@
+# Node
+node_modules/
+npm-debug.log*
+package-lock.json
+
+# Test artifacts
+coverage/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Pack outputs (never commit generated packs)
+packs/
