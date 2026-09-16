@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.x', '24.x']
+    name: Node ${{ matrix.node }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 零运行时依赖（打包/解包走系统 tar），因此无需安装步骤
+      - name: 环境自检
+        run: node -e "console.log(process.version, process.platform, process.arch)"
+
+      - name: 发布一致性自检
+        run: node scripts/release-check.mjs
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 打包预演（npm pack --dry-run）
+        run: npm pack --dry-run

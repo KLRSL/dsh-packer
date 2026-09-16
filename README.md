@@ -233,8 +233,11 @@ dsh plugin --profile web add link:./dsh-packer
 ## 开发
 
 ```bash
-npm test    # node --test "tests/*.test.mjs"
+npm test                          # node --test "tests/*.test.mjs"，37 个用例全绿
+node scripts/release-check.mjs    # 发布一致性自检（版本号 / README 版本露出 / files 白名单 / git 状态）
 ```
+
+**CI**：`.github/workflows/ci.yml` 在 Node 22.x / 24.x 上执行「发布自检 → 单元测试 → `npm pack --dry-run`」（本包零运行时依赖，无需安装步骤），推送与 PR 都会触发。
 
 ## License
 
