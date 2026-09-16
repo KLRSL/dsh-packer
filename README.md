@@ -4,7 +4,7 @@
 >
 > [简体中文](README.md) · [English](README.en.md)
 
-> **v0.2.3** · MIT License · DSH ≥ 0.1.1-rc.2（预发布版本号不受 semver 范围约束，已实测 0.1.5-rc.1）· Node ≥ 22.19.0
+> **v0.2.4** · MIT License · DSH ≥ 0.1.1-rc.2（预发布版本号不受 semver 范围约束，已实测 0.1.5-rc.1）· Node ≥ 22.19.0
 
 dsh-packer 是 [DeepSeek Harness](https://github.com/deepseek-ai/dsh)（DSH）的「Agent 配置打包器」插件：把本地 Agent 资产按模块打包成标准 zip，用于两种场景：
 
@@ -131,6 +131,30 @@ dsh plugin --profile web add link:./dsh-packer
 - 运行中的 SQLite 库（`*.db`、`*.db-wal`、`*.db-shm`、`*.sqlite`）默认既不打包也不恢复——被 DSH / 记忆插件持有，覆写可能损坏数据。
 - 打包文件名带唯一后缀（`dsh-packer-<时间戳>-<随机>-<模式>.zip`），同一秒内多次打包不互相覆盖。
 - 打包使用系统 **bsdtar**（libarchive）生成标准 zip，**零原生 npm 依赖**。
+- 文件与子进程操作全部异步（`node:fs/promises` + `execFile`），哈希与复制走有界并发（默认 16 路），大批量打包不会卡住 DSH 的事件循环。
+
+### 设置页 Web API（`/packer/api/*`）的鉴权与限额
+
+设置页与 `/pack` 命令等价，走插件自己注册的前缀路由 `/packer/api/*`。这条路由的默认姿态是 **fail-closed**——判定顺序为「速率限制 → 鉴权 → 体积 → 路由」，前三步都在**读取请求体之前**完成：
+
+| 项目 | 默认 | 行为 |
+| --- | --- | --- |
+| 鉴权 | `api.authMode: 'auto'` | **只用官方机制**：`ctx.get('connection')`（dsh-client-connection）的 `requestRejection(req)`——与官方 `/api` 通道同一套 Host/Origin 信任 + 浏览器会话鉴权。返回 `401` → 401，`403` → 403，只有 `undefined` 才放行 |
+| 拿不到鉴权服务 | **硬拒绝 403** | `connection` 服务缺失、没有 `requestRejection`、或该调用抛错，一律 403 并说明原因；**不会静默降级**到更弱的通道（要用插件自有令牌，必须显式选 `authMode: 'token'`） |
+| 速率限制 | 60 次 / 60 秒 | **最外层**：按客户端地址（`remoteAddress`）滑动窗口，先于鉴权与读体判定，未授权流量同样吃配额。超限回 429 + `retry-after`；键数量有上界（无定时器、内存有界） |
+| 请求体上限 | 8 MB | 在**完整缓冲请求体之前**判定：有 `Content-Length` 先比对（超限直接 413，一个字节都不读）；没有长度则边读边累计，一超限立刻解绑监听、暂停连接并回 413 |
+| 错误文案 | 出网脱敏 | 服务端绝对路径（盘符 / UNC / Unix 用户目录）统一替换为 `<路径已隐去>`，不回显本机目录结构 |
+
+`api` 配置项（`apply(ctx, { api: { ... } })`）：
+
+| 选项 | 默认 | 说明 |
+| --- | --- | --- |
+| `authMode` | `'auto'` | `'auto'`：只认官方 `connection`，缺失即 403；`'token'`：**显式 opt-in** 的插件自有回退——Host / Origin / `Sec-Fetch-Site` 同源校验 + 一次性令牌（`apply` 时随机生成，经 `webServer.tapIndex` 注入同源 `index.html`，前端自动带 `x-dsh-packer-token` 头），用于宿主确实没有 `connection` 的场合；`'off'`：**不安全**，仅隔离测试用，真实部署别开 |
+| `maxBodyBytes` | `8388608` | 请求体上限（字节） |
+| `rateLimit` / `rateWindowMs` | `60` / `60000` | 速率限制次数与窗口（毫秒） |
+| `token` | 随机生成 | 仅 `authMode: 'token'` 生效；显式传入便于固定令牌/多实例场景 |
+
+`authMode: 'off'` 与显式传入的固定 `token` 都会把安全责任交给部署者，README 记录其存在只为「知道自己选了什么」，不代表推荐。
 
 ## 恢复与差异
 
@@ -181,7 +205,7 @@ dsh plugin --profile web add link:./dsh-packer
 ## 兼容性
 
 - **Node.js** ≥ 22.19.0
-- **DSH 依赖** `@deepseek-ai/dsh-*` ≥ 0.1.1-rc.2（v0.2.3 已实测 0.1.5-rc.1）。**注意：预发布版本号不受 semver 范围约束**——`>=0.1.1-rc.2` 按 node-semver 规则并不满足 `0.1.5-rc.1`（实测 `satisfies=false`），该范围仅作参考记录，不承担版本闸门作用。
+- **DSH 依赖** `@deepseek-ai/dsh-*` ≥ 0.1.1-rc.2（v0.2.4 已实测 0.1.5-rc.1）。**注意：预发布版本号不受 semver 范围约束**——`>=0.1.1-rc.2` 按 node-semver 规则并不满足 `0.1.5-rc.1`（实测 `satisfies=false`），该范围仅作参考记录，不承担版本闸门作用。
 - **peer 依赖**：`@deepseek-ai/cordis` ^4.0.2（插件生命周期基准，由宿主提供）；`@deepseek-ai/dsh-tools` ≥0.1.1-rc.2 与 `@deepseek-ai/dsh-session` ≥0.1.1-rc.2 **未被 `index.mjs` 直接 import**——本插件只使用 `ctx.commands` / `ctx.webServer` / `ctx.slots` 等宿主内建服务，命令与 HTTP 入口都从 context 取，故这两项已在 `package.json` 的 `peerDependenciesMeta` 中标记为 `optional: true`（宿主必定提供，安装时不再强制校验），范围同为参考记录。
 - **bsdtar**：Windows 10+ 自带 `tar.exe`（bsdtar/libarchive）；macOS 的 `tar` 即 bsdtar。不依赖任何 npm 原生模块。实测本机 bsdtar 会拒绝 `..` 成员；解包白名单校验在其之前先做，错误信息更明确，且对符号链接成员/其他 tar 实现同样生效。
 
@@ -189,6 +213,7 @@ dsh plugin --profile web add link:./dsh-packer
 
 | 版本 | 日期 | 类型 | 要点 |
 | --- | --- | --- | --- |
+| **v0.2.4** | 2026-09-17 | 异步化 / 安全加固 | 文件与子进程操作全链路异步（`node:fs/promises` + `execFile`，哈希改流式、复制与哈希走有界并发 16 路，`sha256()` 失败即抛错），对外 API 一律返回 Promise、不再阻塞事件循环；新增 `/packer/api/*` 防护：鉴权默认 fail-closed（只用官方 `connection.requestRejection`，服务缺失/接口缺失/调用抛错一律 403）、显式 opt-in 的一次性令牌回退（`authMode: 'token'`，同源校验 + `webServer.tapIndex` 注入）、速率限制（60 次/分钟，最外层）与请求体上限（8 MB，在完整缓冲请求体之前判定）、错误文案路径脱敏；`apply()` 明确接线到 `webServer.register({ kind: 'prefix', path: '/packer/api' })`；测试补齐 47 例（含未授权 403 / 超限 413 / 限流 429 / 令牌路径 / 无 connection 默认拒绝 / apply 接线） |
 | **v0.2.3** | 2026-09-16 | 安全加固 | 恢复侧目标路径 containment + rel 白名单（拒绝绝对/盘符/UNC/`..`）；完整性 fail-closed（缺指纹或格式非法一律拒绝，`sha256()` 异常改为抛出、改流式哈希）；解包前 `tar -tf` 成员白名单 + 拒绝链接类成员 + 临时目录统一 `try/finally` 清理；恢复改为「备份 → 临时文件 → rename 原子替换 → 失败中止回滚」；`memory` 模块默认排除 `*.db*`；隐私扫描补齐 Unix/UNC 路径、无引号密钥与裸密钥形状、`.env` 等无扩展名文本，命中数按行全量计数；打包文件名加唯一后缀；`peerDependenciesMeta` 标记宿主内建 peer 为 optional；前端错误提示改为展示服务端原因 |
 | **v0.2.2** | 2026-09-05 | 适配 / UI | 适配 DSH 0.1.2-rc.1；管理面板按「骨架/血肉/呼吸」设计语言定制——打包工作流布局（阶段流程条 / 器材面板 / diff 色带）+ 橙琥珀青品牌色（打包迁移）+ 深色适配（DSH 主题跟随，双通道探测） |
 | **v0.2.1** | 2026-09-05 | UI 重构 | Config Packer 面板 UI 重构——neutralSurface 底 + 白色卡片（max-width 860 居中、圆角 16）、4/8px 栅格、150ms 克制动效；配色取自 dsh-fuse default 令牌（`--pk-*` 变量零硬编码）；差异报表四列计数徽章 + 语义色点（新增=绿 / 变更=橙 / 相同与跳过=灰）；隐私风险默认警告橙 |
