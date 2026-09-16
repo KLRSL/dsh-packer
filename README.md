@@ -4,7 +4,7 @@
 >
 > [简体中文](README.md) · [English](README.en.md)
 
-> **v0.2.2** · MIT License · DSH ≥ 0.1.1-rc.2（已适配 0.1.2-rc.1）· Node ≥ 22.19.0
+> **v0.2.3** · MIT License · DSH ≥ 0.1.1-rc.2（预发布版本号不受 semver 范围约束，已实测 0.1.5-rc.1）· Node ≥ 22.19.0
 
 dsh-packer 是 [DeepSeek Harness](https://github.com/deepseek-ai/dsh)（DSH）的「Agent 配置打包器」插件：把本地 Agent 资产按模块打包成标准 zip，用于两种场景：
 
@@ -17,12 +17,13 @@ dsh-packer 是 [DeepSeek Harness](https://github.com/deepseek-ai/dsh)（DSH）�
 
 | 特性 | 说明 |
 | --- | --- |
-| 模块化打包 | 六个模块任意组合：`skills` / `sessions` / `profiles` / `settings` / `presets` / `memory` |
+| 模块化打包 | 六个模块任意组合：`skills` / `sessions` / `profiles` / `settings` / `presets` / `memory`（`memory` 默认排除运行中的 SQLite 库 `*.db*`） |
 | 双模式预设 | **迁移**（全选）/ **分享**（只勾 Skills，自动排除会话、记忆与个人 skill 子目录） |
-| 隐私安全扫描 | 打包前检测本地绝对路径、用户目录路径、疑似密钥、个人昵称；**分享命中即拦截，迁移仅报告** |
+| 隐私安全扫描 | 打包前检测盘符 / Unix / UNC 路径、用户目录路径、疑似密钥赋值、密钥形状（`sk-`、`ghp_`、`AKIA`、JWT 等）、个人昵称；逐行**全量计数**；**分享命中即拦截，迁移仅报告** |
 | 文件级操作预览 | 打包前预览完整文件清单；恢复前差异报告（新增 / 变更 / 相同 / 跳过） |
 | 恢复冲突三选 | 覆盖 / 跳过 / 内容合并（合并 = 追加，绝不覆盖已有内容） |
-| 清单完整性校验 | `manifest.json` 记录 schemaVersion + 每个文件 SHA-256 指纹，恢复前 fail-closed 校验 |
+| 恢复安全写入 | 先备份目标到 packs 目录下的 `.restore-backups/<时间戳>/`，写临时文件后 `rename` **原子替换**；任一环节失败即**中止并回滚**已替换/已新增的文件 |
+| 清单完整性校验 | `manifest.json` 记录 schemaVersion + 每个文件 SHA-256 指纹；恢复前校验源文件与清单一致，**缺指纹或指纹格式非法一律拒绝**（fail-closed） |
 | 包管理与备注 | 包列表（时间 / 大小 / 模块 / 备注）、删除、重命名、打包时填写备注 |
 | 分享包自动附 README | 自动生成并附带说明包内容的 `README.md` |
 | 深色模式适配 | 打包工作流面板跟随 DSH 主题（`--dsw-alias-*` 变量，双通道探测） |
@@ -80,7 +81,7 @@ dsh plugin --profile web add link:./dsh-packer
 /pack restore <zip路径> --strategy merge
 ```
 
-恢复前自动校验 `manifest.json`（schemaVersion + SHA-256），确认差异报告后按策略应用，按需重启 DSH。
+恢复前自动校验 `manifest.json`（schemaVersion + 每条指纹的合法性 + 每个源文件的 SHA-256），确认差异报告后按策略应用；写入前先备份、`rename` 原子替换，失败即中止回滚。完成按需重启 DSH。
 
 ## 打包模块
 
@@ -91,7 +92,7 @@ dsh plugin --profile web add link:./dsh-packer
 | `profiles` | Profile 配置（不含 `node_modules`），位于 `~/.dsh/profiles` | ✅ | ❌ |
 | `settings` | 全局设置（`settings.yaml`） | ✅ | ❌ |
 | `presets` | Agent 预设（`.agent-presets`） | ✅ | ❌ |
-| `memory` | 记忆数据（`DSH_MEMORY_ROOT` 或 `~/.dsh/memory`，不含 `backups/`） | ✅ | ❌ |
+| `memory` | 记忆数据（`DSH_MEMORY_ROOT` 或 `~/.dsh/memory`，不含 `backups/` 与运行中的 SQLite 库 `*.db*`） | ✅ | ❌ |
 
 **双模式预设**：
 
@@ -100,15 +101,19 @@ dsh plugin --profile web add link:./dsh-packer
 
 ## 隐私与安全
 
-**扫描规则**（仅针对文本文件）：
+**扫描规则**（扫描范围：已知文本后缀的文件 + 无扩展名但确定是文本的文件，如 `.env`；含 NUL 字节的二进制文件跳过）：
 
 | 规则 | 说明 |
 | --- | --- |
-| 本地绝对路径 | 盘符形式路径（如 `D:\...`、`/home/...`） |
-| 用户目录路径 | 操作系统用户配置文件目录下的路径 |
-| 疑似密钥 / Token | `api_key`、`secret`、`password`、`token`、`bearer`、`authorization` 等赋值 |
-| 个人昵称 | 用户昵称文本 |
-| Windows 用户名路径 | 用户名出现在路径中 |
+| 本地绝对路径（盘符） | 盘符形式路径，如 `D:\...`、`C:/...` |
+| Unix 绝对路径 | `/home/...`、`/Users/...`、`/root/...`、`/etc/...`、`/tmp/...` 等 |
+| UNC / 网络路径 | `\\服务器\共享\...` |
+| 用户目录路径 | 操作系统用户配置文件目录下的路径（`C:\Users\<名>`、`/home/<名>`、`/Users/<名>`） |
+| 疑似密钥 / Token 赋值 | `api_key`、`access_key`、`secret`、`password`、`token`、`bearer`、`authorization`、`credential` 等赋值——**带引号或不带引号**都算 |
+| 密钥形状 | 裸密钥本身：`sk-...`、`ghp_...`、`github_pat_...`、`glpat-...`、`AKIA...`、`xox?-...`、JWT（`eyJ.....*.*`） |
+| 个人昵称 | 用户昵称文本（由部署者通过 `config.personalPatterns` 注入） |
+
+计数按「文件 + 规则 + 行」逐处统计：同一行出现多处命中会如实累计（不会每规则只算 1 处）。
 
 **拦截策略**：
 
@@ -119,8 +124,12 @@ dsh plugin --profile web add link:./dsh-packer
 
 其他安全措施：
 
-- 每个文件的 **SHA-256** 指纹写入 `manifest.json`，恢复时用于完整性校验（fail-closed）。
-- 恢复路径做 containment 校验（zip-slip / 篡改清单的 `../` 越界一律拒绝）。
+- 每个文件的 **SHA-256** 指纹写入 `manifest.json`，恢复时用于完整性校验（fail-closed）；清单条目**缺指纹或指纹格式非法一律拒绝**，不写入指纹的文件在打包时被跳过并如实上报（绝不写空指纹）。
+- 恢复对**源路径与目标路径双向**做 containment 校验：源必须在解压目录内，目标必须落在模块目标根内（zip-slip / 篡改清单的 `../` 越界一律拒绝）；绝对路径、盘符路径、UNC 路径、`..` 片段在恢复前就被白名单拒绝。
+- 解包前先用 `tar -tf` 列成员做白名单校验（拒绝绝对路径 / 盘符 / UNC / `..`），并拒绝符号链接、硬链接等非普通文件类型；解压后再扫一遍解压结果，出现符号链接即拒绝。临时解压目录统一在 `try/finally` 中清理（成功、失败都不残留）。
+- 恢复前先备份目标（`<packs>/.restore-backups/<时间戳>/`），写临时文件后 `rename` 原子替换；任一环节失败即中止并回滚本次已替换/已新增的文件。
+- 运行中的 SQLite 库（`*.db`、`*.db-wal`、`*.db-shm`、`*.sqlite`）默认既不打包也不恢复——被 DSH / 记忆插件持有，覆写可能损坏数据。
+- 打包文件名带唯一后缀（`dsh-packer-<时间戳>-<随机>-<模式>.zip`），同一秒内多次打包不互相覆盖。
 - 打包使用系统 **bsdtar**（libarchive）生成标准 zip，**零原生 npm 依赖**。
 
 ## 恢复与差异
@@ -128,15 +137,17 @@ dsh plugin --profile web add link:./dsh-packer
 恢复流程：
 
 1. **导入 zip** —— 设置页选择文件，或 `/pack restore <zip路径>`。
-2. **manifest 校验** —— `manifest.json` 存在、schemaVersion 与当前版本兼容、每个源文件 SHA-256 与清单一致；任一不匹配即 **fail-closed** 整体拒绝（不应用任何文件）。
-3. **差异报告** —— 新增 / 变更 / 相同 / 跳过 四类计数与文件清单。
-4. **冲突策略三选**：
+2. **解包校验** —— 先列包内成员做白名单校验（绝对路径 / 盘符 / UNC / `..` / 链接类成员一律拒绝），再读 `manifest.json`。
+3. **manifest 校验** —— `manifest.json` 存在、schemaVersion 与当前版本兼容、每条清单条目的 SHA-256 指纹存在且合法、每个源文件哈希与清单一致；任一不匹配即 **fail-closed 拒绝**。
+4. **差异报告** —— 新增 / 变更 / 相同 / 跳过 四类计数与文件清单。
+5. **冲突策略三选**：
    - `overwrite` —— 用包内内容覆盖目标文件（默认）；
    - `skip` —— 保留目标文件，跳过冲突项；
    - `merge` —— 文本文件把包内内容**追加**到目标文件末尾（带分隔注释），已有内容绝不覆盖；非文本文件退化为覆盖。
-5. 应用，按需重启 DSH。
+6. **备份 → 原子替换 → 失败回滚** —— 每个被覆盖/追加的目标先备份到 `<packs>/.restore-backups/<时间戳>/`，包内内容先写成临时文件再 `rename` 原子替换；**任一环节失败即中止**，并按记录把本次已替换/已新增的文件回滚回去（计数随回滚归零，回滚数单独上报）。
+7. 应用，按需重启 DSH。
 
-与包内完全一致的文件在任何策略下都会自动跳过。JSON / YAML 等结构化配置**不支持 merge**（追加即损坏），请使用覆盖或手工合并。
+与包内完全一致的文件在任何策略下都会自动跳过。JSON / YAML 等结构化配置**不支持 merge**（追加即损坏），请使用覆盖或手工合并。运行中的 SQLite 库（`*.db*`）默认跳过不恢复（避免覆盖记忆数据）。
 
 ## /pack 命令参考
 
@@ -155,7 +166,7 @@ dsh plugin --profile web add link:./dsh-packer
 | `restore` | `<zip路径>` 待恢复包；`--strategy overwrite\|skip\|merge` | 导入 zip → 校验 → 差异报告 → 按所选策略应用 |
 | `scan` | — | 对所有可打包模块执行隐私扫描，报告敏感痕迹 |
 
-**输出目录**：打包结果写入 `~/.dsh/packs/`（`DSH_PACKS_DIR` 可覆盖）；每次打包还会在同目录生成一个同名 `.json` 摘要文件（记录时间 / 模块 / 备注 / 文件数），供包列表与快速识别使用。包列表、删除、重命名也可在设置页「配置打包」标签页操作。
+**输出目录**：打包结果写入 `~/.dsh/packs/`（`DSH_PACKS_DIR` 可覆盖）；文件名形如 `dsh-packer-<时间戳>-<随机后缀>-<模式>.zip`（唯一后缀保证同秒多次打包不互相覆盖），每次打包还会在同目录生成一个同名 `.json` 摘要文件（记录时间 / 模块 / 备注 / 文件数），供包列表与快速识别使用。恢复时的目标备份写入同目录下的 `.restore-backups/<时间戳>-<随机后缀>/`（可随时删除，列表与本插件都不会读它）。包列表、删除、重命名也可在设置页「配置打包」标签页操作。
 
 ## 配置与环境变量
 
@@ -170,13 +181,15 @@ dsh plugin --profile web add link:./dsh-packer
 ## 兼容性
 
 - **Node.js** ≥ 22.19.0
-- **DSH 依赖** `@deepseek-ai/dsh-*` ≥ 0.1.1-rc.2（当前 latest 线；v0.2.2 已适配并实测 0.1.2-rc.1；peer 依赖：`@deepseek-ai/cordis` ^4.0.2、`@deepseek-ai/dsh-tools` ≥0.1.1-rc.2、`@deepseek-ai/dsh-session` ≥0.1.1-rc.2）
-- **bsdtar**：Windows 10+ 自带 `tar.exe`（bsdtar/libarchive）；macOS 的 `tar` 即 bsdtar。不依赖任何 npm 原生模块。
+- **DSH 依赖** `@deepseek-ai/dsh-*` ≥ 0.1.1-rc.2（v0.2.3 已实测 0.1.5-rc.1）。**注意：预发布版本号不受 semver 范围约束**——`>=0.1.1-rc.2` 按 node-semver 规则并不满足 `0.1.5-rc.1`（实测 `satisfies=false`），该范围仅作参考记录，不承担版本闸门作用。
+- **peer 依赖**：`@deepseek-ai/cordis` ^4.0.2（插件生命周期基准，由宿主提供）；`@deepseek-ai/dsh-tools` ≥0.1.1-rc.2 与 `@deepseek-ai/dsh-session` ≥0.1.1-rc.2 **未被 `index.mjs` 直接 import**——本插件只使用 `ctx.commands` / `ctx.webServer` / `ctx.slots` 等宿主内建服务，命令与 HTTP 入口都从 context 取，故这两项已在 `package.json` 的 `peerDependenciesMeta` 中标记为 `optional: true`（宿主必定提供，安装时不再强制校验），范围同为参考记录。
+- **bsdtar**：Windows 10+ 自带 `tar.exe`（bsdtar/libarchive）；macOS 的 `tar` 即 bsdtar。不依赖任何 npm 原生模块。实测本机 bsdtar 会拒绝 `..` 成员；解包白名单校验在其之前先做，错误信息更明确，且对符号链接成员/其他 tar 实现同样生效。
 
 ## 版本历史
 
 | 版本 | 日期 | 类型 | 要点 |
 | --- | --- | --- | --- |
+| **v0.2.3** | 2026-09-16 | 安全加固 | 恢复侧目标路径 containment + rel 白名单（拒绝绝对/盘符/UNC/`..`）；完整性 fail-closed（缺指纹或格式非法一律拒绝，`sha256()` 异常改为抛出、改流式哈希）；解包前 `tar -tf` 成员白名单 + 拒绝链接类成员 + 临时目录统一 `try/finally` 清理；恢复改为「备份 → 临时文件 → rename 原子替换 → 失败中止回滚」；`memory` 模块默认排除 `*.db*`；隐私扫描补齐 Unix/UNC 路径、无引号密钥与裸密钥形状、`.env` 等无扩展名文本，命中数按行全量计数；打包文件名加唯一后缀；`peerDependenciesMeta` 标记宿主内建 peer 为 optional；前端错误提示改为展示服务端原因 |
 | **v0.2.2** | 2026-09-05 | 适配 / UI | 适配 DSH 0.1.2-rc.1；管理面板按「骨架/血肉/呼吸」设计语言定制——打包工作流布局（阶段流程条 / 器材面板 / diff 色带）+ 橙琥珀青品牌色（打包迁移）+ 深色适配（DSH 主题跟随，双通道探测） |
 | **v0.2.1** | 2026-09-05 | UI 重构 | Config Packer 面板 UI 重构——neutralSurface 底 + 白色卡片（max-width 860 居中、圆角 16）、4/8px 栅格、150ms 克制动效；配色取自 dsh-fuse default 令牌（`--pk-*` 变量零硬编码）；差异报表四列计数徽章 + 语义色点（新增=绿 / 变更=橙 / 相同与跳过=灰）；隐私风险默认警告橙 |
 | **v0.2.0** | 2026-09-05 | 安全加固 | 隐私扫描修复：合并后的个人规则真正参与循环；恢复前对每个源文件做 manifest SHA-256 校验（fail-closed）；恢复路径 containment（zip-slip / 篡改清单拒越界）；结构化配置（JSON/YAML）禁用 append 合并（会损坏） |
@@ -200,6 +213,18 @@ dsh plugin --profile web add link:./dsh-packer
 **「合并」策略具体怎么工作？**
 
 对文本文件：把包内内容**追加**到目标文件末尾，带分隔注释——已有内容绝不覆盖；非文本文件退化为覆盖；JSON / YAML 等结构化配置不支持合并（追加即损坏），请用覆盖或手工合并。与包内完全一致的文件在任何策略下都自动跳过。
+
+**恢复报「已中止 / 已回滚」是什么意思？**
+
+恢复是「整批或不做」的：任一环节（路径校验、指纹校验、写盘）失败就立即中止，并把本次已经替换/新增的文件按备份回滚回去——`已回滚 N` 表示回滚了多少个文件，失败原因在设置页的失败清单里逐条列出。备份留在 `<packs>/.restore-backups/` 下，可手工核对。
+
+**为什么记忆数据库（`*.db*`）没被恢复？**
+
+运行中的 SQLite 库被 DSH / 记忆插件持有，直接覆写可能损坏数据。本插件默认既不打包也不恢复 `*.db`、`*.db-wal`、`*.db-shm`、`*.sqlite`，恢复时会把它计入「跳过」并单列原因。
+
+**恢复报「清单条目缺少合法 SHA-256 指纹」？**
+
+该包不是 dsh-packer 生成的、或 `manifest.json` 被手工改过。指纹缺失/格式非法一律拒绝恢复（fail-closed），请重新分发原包或重新生成。
 
 **包存在哪里？**
 

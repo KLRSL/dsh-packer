@@ -11,6 +11,9 @@
 //   7. 分享包自动附 README 说明
 //
 // 安全：.credentials.yaml / .anonymous-user-id 永不打包
+//   - 恢复：目标路径白名单 + containment 校验；清单指纹 fail-closed；先备份目标 → 写临时文件 → rename
+//     原子替换；任一环节失败即中止并回滚已替换文件；SQLite 库（*.db*）默认不打包不恢复
+//   - 解包：先列成员做白名单校验（拒绝绝对路径/盘符/UNC/`..`/链接类型），临时目录 try/finally 统一清理
 //
 // 官方契约要点（cordis-plugin-development SKILL + rc.5/rc.6 实测）：
 //   - 可选服务用 ctx.get(name) + 缺失处理；硬依赖才声明 inject
@@ -34,6 +37,9 @@ const MEMORY_ROOT = process.env.DSH_MEMORY_ROOT || path.join(os.homedir(), '.dsh
 
 const SCHEMA_VERSION = 1
 const NEVER_PACK = ['.credentials.yaml', '.anonymous-user-id']
+
+// 运行中的 SQLite 数据库（含 WAL/SHM/journal）：默认不打包、不恢复（见 memory 模块 skipFiles）
+const DB_FILE_RE = /(^|\.)db(-wal|-shm|-journal)?$|\.sqlite3?$/i
 
 // ---------- 模块定义（逻辑名 → 本地路径；恢复时按当前机器映射） ----------
 
@@ -82,6 +88,8 @@ const MODULES = {
     default: true,
     share: false,
     skipDirs: ['backups'],
+    // 运行中的 SQLite 库被 DSH / 记忆插件持有，复制或覆盖都可能损坏，默认排除
+    skipFiles: DB_FILE_RE,
   },
 }
 
@@ -91,10 +99,37 @@ function readFile(p) {
   try { return fs.readFileSync(p, 'utf-8') } catch { return '' }
 }
 
+// 流式 SHA-256：分块读取，大文件不再整份进内存；计算失败必须抛错（绝不返回空串，
+// 否则空指纹会与"目标侧也算不出指纹"撞成"相同"，完整性校验被静默跳过）
 function sha256(p) {
+  const hash = crypto.createHash('sha256')
+  const fd = fs.openSync(p, 'r')
   try {
-    return crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex')
-  } catch { return '' }
+    const buf = Buffer.allocUnsafe(1024 * 1024)
+    let n
+    while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
+      hash.update(n === buf.length ? buf : buf.subarray(0, n))
+    }
+  } finally {
+    fs.closeSync(fd)
+  }
+  return hash.digest('hex')
+}
+
+/** 比较用哈希：目标读不出来时返回 null（与"合法指纹"永远不相等） */
+function trySha256(p) {
+  try { return sha256(p) } catch { return null }
+}
+
+function fileSize(p) {
+  try { return fs.statSync(p).size } catch { return 0 }
+}
+
+const SHA256_RE = /^[0-9a-f]{64}$/i
+
+/** 清单指纹必须存在且是合法 SHA-256（fail-closed） */
+function isValidSha256(s) {
+  return typeof s === 'string' && SHA256_RE.test(s)
 }
 
 function nowStamp() {
@@ -103,11 +138,46 @@ function nowStamp() {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
 }
 
+/** 唯一后缀：同一秒内多次打包不再互相覆盖 */
+function uniqueSuffix() {
+  return crypto.randomBytes(3).toString('hex')
+}
+
+// 已知文本后缀：直接按文本扫描
 const TEXT_EXT = new Set(['.md', '.yaml', '.yml', '.json', '.js', '.mjs', '.cjs', '.txt', '.jsonl', '.log', '.py', '.ps1', '.ts', '.toml', '.patch', '.i18n.yaml'])
 
+// 明确二进制后缀：直接跳过扫描（不做内容嗅探）
+const BINARY_EXT = new Set(['.zstd', '.zip', '.gz', '.tar', '.tgz', '.bz2', '.xz', '.7z', '.rar',
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.pdf', '.db', '.db-wal', '.db-shm', '.sqlite', '.sqlite3',
+  '.exe', '.dll', '.node', '.so', '.dylib', '.wasm', '.bin', '.woff', '.woff2', '.ttf', '.otf', '.mp3', '.mp4', '.webm'])
+
+// 无扩展名但确定是文本的常见文件（如 .env），必须纳入扫描
+const TEXT_BASENAMES = new Set(['.env', 'Dockerfile', 'Makefile', 'LICENSE', 'Procfile'])
+
+/** 内容嗅探：前 4KB 出现 NUL 字节视为二进制；读不到则按二进制处理（不扫，避免产生假结果） */
+function looksBinary(p) {
+  let fd
+  try {
+    fd = fs.openSync(p, 'r')
+    const buf = Buffer.allocUnsafe(4096)
+    const n = fs.readSync(fd, buf, 0, buf.length, 0)
+    for (let i = 0; i < n; i++) if (buf[i] === 0) return true
+    return false
+  } catch {
+    return true
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd) } catch { /* ignore */ } }
+  }
+}
+
+/** 是否按文本处理：已知文本后缀 / 已知文本文件名（.env）→ 是；已知二进制或含 NUL → 否 */
 function isTextFile(p) {
+  const base = path.basename(p)
   const ext = path.extname(p).toLowerCase()
-  return TEXT_EXT.has(ext) || p.endsWith('.i18n.yaml')
+  if (BINARY_EXT.has(ext)) return false
+  if (TEXT_EXT.has(ext) || p.endsWith('.i18n.yaml')) return true
+  if (TEXT_BASENAMES.has(base) || base.startsWith('.env.')) return true
+  return !looksBinary(p)
 }
 
 // ---------- 模块文件收集 ----------
@@ -136,6 +206,7 @@ function collectModuleFiles(mod, excludeSharePersonal = false) {
         if (excludeSharePersonal && mod.exclude?.includes(e.name)) continue
         walk(full, relPath)
       } else if (e.isFile()) {
+        if (mod.skipFiles && mod.skipFiles.test(e.name)) continue
         files.push({ rel: relPath, abs: full })
       }
     }
@@ -159,9 +230,12 @@ function moduleStats(mod) {
 // 通用隐私规则（开源默认）。个人化规则（昵称/用户名等）由部署者通过 config.personalPatterns 注入，
 // 不硬编码进开源代码——每个部署者自己的本地规则自己配。
 const PRIVACY_PATTERNS = [
-  { id: 'abs-path', label: '本地绝对路径', re: /[A-Za-z]:[\\/][^\s"'`<>]+/ },
-  { id: 'user-path', label: '用户目录路径', re: /C:[\\/]Users[\\/][^\s"'`<>\\/]+/i },
-  { id: 'credential', label: '疑似密钥/Token', re: /(?:api[_-]?key|secret|password|token|bearer|authorization)\s*[:=]\s*["'][^"']{8,}["']/i },
+  { id: 'abs-path', label: '本地绝对路径（盘符）', re: /[A-Za-z]:[\\/][^\s"'`<>|?*]+/g },
+  { id: 'unc-path', label: 'UNC / 网络路径', re: /\\\\[A-Za-z0-9._$-]+\\[^\s"'`<>|?*]+/g },
+  { id: 'unix-path', label: 'Unix 绝对路径', re: /(?<![\w.-])\/(?:home|Users|root|mnt|media|opt|srv|etc|var|tmp|usr)\/[^\s"'`<>|]+/g },
+  { id: 'user-path', label: '用户目录路径', re: /(?:[A-Za-z]:[\\/]Users[\\/]|\/(?:home|Users)\/)[^\s"'`<>\\/:]+/g },
+  { id: 'credential', label: '疑似密钥 / Token 赋值', re: /(?:api[_-]?key|apikey|access[_-]?key|secret|password|passwd|token|bearer|authorization|credential)\s*[:=]\s*["']?[A-Za-z0-9_\-./+=]{8,}["']?/gi },
+  { id: 'key-shape', label: '密钥形状（sk-/ghp_/AKIA/JWT 等）', re: /(?:\bsk-[A-Za-z0-9_-]{16,}|\bghp_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}|\bglpat-[A-Za-z0-9_-]{16,}|\bAKIA[0-9A-Z]{16}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/g },
 ]
 
 let PERSONAL_PATTERNS = [] // 部署者注入的个人规则：[{ label, re }]
@@ -177,23 +251,62 @@ export function setPersonalPatterns(list) {
     : []
 }
 
+/** 命中总数（按行聚合的条目用 count 累加，绝不低报） */
+function countFindings(findings) {
+  return findings.reduce((s, f) => s + (f.count || 1), 0)
+}
+
+function formatFinding(f) {
+  const line = f.line ? `:${f.line}` : ''
+  const times = f.count > 1 ? `（本行 ${f.count} 处）` : ''
+  return `${f.label} @ ${f.file}${line}${times}${f.sample ? `（${f.sample}）` : ''}`
+}
+
+/**
+ * 隐私扫描：文本文件按规则全量匹配（g 循环），按"文件 + 规则 + 行"聚合计数——
+ * 既不低报命中数，也不会让大文件把结果数组撑爆。
+ */
 function privacyScan(files) {
   const patterns = [...PRIVACY_PATTERNS, ...PERSONAL_PATTERNS]
   const findings = []
   for (const f of files) {
-    if (!isTextFile(f.rel) && !isTextFile(f.abs)) continue
-    const text = readFile(f.abs)
+    const probe = f.abs || f.rel
+    if (!isTextFile(probe)) continue
+    const text = readFile(probe)
     if (!text) continue
+    // 行起始偏移：把命中位置映射回行号
+    const lineStarts = [0]
+    for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) lineStarts.push(i + 1)
+    const lineOf = (idx) => {
+      let lo = 0
+      let hi = lineStarts.length - 1
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1
+        if (lineStarts[mid] <= idx) lo = mid
+        else hi = mid - 1
+      }
+      return lo
+    }
     for (const pat of patterns) {
-      const m = text.match(pat.re)
-      if (m) {
-        const line = text.split('\n').findIndex((l) => pat.re.test(l))
+      const re = pat.re.global ? pat.re : new RegExp(pat.re.source, `${pat.re.flags}g`)
+      re.lastIndex = 0
+      const perLine = new Map()
+      let m
+      while ((m = re.exec(text)) !== null) {
+        if (m[0] === '') { re.lastIndex++; continue }
+        const line = lineOf(m.index)
+        const cur = perLine.get(line)
+        if (cur) cur.count++
+        else perLine.set(line, { count: 1, sample: String(m[0]).slice(0, 80) })
+      }
+      for (const [line, info] of perLine) {
         findings.push({
           file: f.rel,
           pattern: pat.id,
           label: pat.label,
-          line: line >= 0 ? line + 1 : null,
-          sample: String(m[0]).slice(0, 80),
+          line: line + 1,
+          count: info.count,
+          sample: info.sample,
         })
       }
     }
@@ -236,18 +349,28 @@ function createPack({ modules, mode = 'migrate', note = '', dryRun = false }) {
   }
   const share = mode === 'share'
   const collected = []
+  const unreadable = []
   for (const name of modules) {
     const mod = MODULES[name]
     const files = collectModuleFiles(mod, share)
-    for (const f of files) collected.push({ module: name, ...f, sha256: sha256(f.abs) })
+    for (const f of files) {
+      // 读不出内容的文件绝不写入空指纹，直接跳过并如实上报
+      let hash
+      try { hash = sha256(f.abs) } catch (err) {
+        unreadable.push({ module: name, rel: f.rel, error: String(err.message || err) })
+        continue
+      }
+      collected.push({ module: name, ...f, sha256: hash })
+    }
   }
   if (!collected.length) throw new Error('所选模块没有可打包的文件')
 
   // 隐私扫描（分享模式强制拦截；迁移模式仅警告）
   const findings = privacyScan(collected)
-  if (share && findings.length) {
-    throw new Error(`隐私扫描发现 ${findings.length} 处敏感痕迹，分享模式已拦截：\n` +
-      findings.slice(0, 10).map((f) => `- ${f.label} @ ${f.file}${f.line ? `:${f.line}` : ''}（${f.sample}）`).join('\n'))
+  const findingTotal = countFindings(findings)
+  if (share && findingTotal) {
+    throw new Error(`隐私扫描发现 ${findingTotal} 处敏感痕迹，分享模式已拦截：\n` +
+      findings.slice(0, 10).map((f) => `- ${formatFinding(f)}`).join('\n'))
   }
 
   // 文件级清单（供确认）
@@ -257,7 +380,8 @@ function createPack({ modules, mode = 'migrate', note = '', dryRun = false }) {
       dryRun: true,
       manifest,
       privacy: findings,
-      totalBytes: collected.reduce((s, f) => s + (fs.statSync(f.abs).size || 0), 0),
+      unreadable,
+      totalBytes: collected.reduce((s, f) => s + fileSize(f.abs), 0),
     }
   }
 
@@ -274,9 +398,9 @@ function createPack({ modules, mode = 'migrate', note = '', dryRun = false }) {
     if (share) {
       fs.writeFileSync(path.join(stage, 'README.md'), shareReadme(manifest), 'utf-8')
     }
-    // 打包
+    // 打包（文件名带唯一后缀，同秒多次打包不互相覆盖）
     fs.mkdirSync(PACKS_DIR, { recursive: true })
-    const zipName = `dsh-packer-${nowStamp()}-${mode}.zip`
+    const zipName = `dsh-packer-${nowStamp()}-${uniqueSuffix()}-${mode}.zip`
     const zipPath = path.join(PACKS_DIR, zipName)
     execTar(['-a', '-cf', zipPath, '-C', stage, '.'])
     // 摘要文件（包管理快速读取）
@@ -287,11 +411,11 @@ function createPack({ modules, mode = 'migrate', note = '', dryRun = false }) {
       note,
       modules,
       fileCount: collected.length,
-      totalBytes: collected.reduce((s, f) => s + (fs.statSync(f.abs).size || 0), 0),
-      privacyFindings: findings.length,
+      totalBytes: collected.reduce((s, f) => s + fileSize(f.abs), 0),
+      privacyFindings: findingTotal,
     }
     fs.writeFileSync(path.join(PACKS_DIR, zipName.replace(/\.zip$/, '.json')), JSON.stringify(summary, null, 2), 'utf-8')
-    return { ok: true, pack: summary, privacy: findings }
+    return { ok: true, pack: summary, privacy: findings, unreadable }
   } finally {
     fs.rmSync(stage, { recursive: true, force: true })
   }
@@ -370,10 +494,72 @@ function renamePack(oldName, newName) {
 
 // ---------- 恢复 ----------
 
+/**
+ * 解包前白名单校验：成员名不得是绝对路径 / 盘符 / UNC / 含 `..` 片段；
+ * 成员类型只放行普通文件（-）与目录（d）——符号链接、硬链接、设备文件一律拒绝。
+ */
+function validateArchiveMembers(zipPath) {
+  let listing
+  try {
+    listing = execTar(['-tf', zipPath])
+  } catch (err) {
+    throw new Error(`读取包内清单失败: ${String(err.message || err)}`)
+  }
+  const members = String(listing).split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+  if (!members.length) throw new Error('包内没有任何成员（空包或不是有效 zip）')
+  for (const raw of members) {
+    const name = raw.replace(/^\.\//, '')
+    if (!name) continue
+    if (name.includes('\0')) throw new Error('包内成员名含非法字符，已拒绝解包（fail-closed）')
+    if (/^[A-Za-z]:/.test(name)) throw new Error(`包内成员名非法（盘符路径）: ${name}`)
+    if (name.startsWith('/') || name.startsWith('\\')) throw new Error(`包内成员名非法（绝对路径/UNC）: ${name}`)
+    if (name.split(/[\\/]/).includes('..')) throw new Error(`包内成员名越界（含 .. 片段）: ${name}`)
+  }
+  // 类型校验（第二遍列表带类型字符）：链接类成员会把解包指向包外
+  let verbose
+  try {
+    verbose = execTar(['-tvf', zipPath])
+  } catch (err) {
+    throw new Error(`读取包内成员类型失败: ${String(err.message || err)}`)
+  }
+  for (const line of String(verbose).split(/\r?\n/)) {
+    if (!line) continue
+    const type = line[0]
+    if (type !== '-' && type !== 'd') {
+      throw new Error(`包内含不允许的成员类型（${type}），已拒绝解包（fail-closed）: ${line.slice(0, 120)}`)
+    }
+  }
+  return members
+}
+
+/** 解压后再查一层：解压结果中出现符号链接即拒绝（防列表解析被绕过） */
+function assertNoLinkEntries(dir) {
+  const stack = [dir]
+  while (stack.length) {
+    const cur = stack.pop()
+    let entries = []
+    try { entries = fs.readdirSync(cur, { withFileTypes: true }) } catch { continue }
+    for (const e of entries) {
+      const full = path.join(cur, e.name)
+      let st
+      try { st = fs.lstatSync(full) } catch { continue }
+      if (st.isSymbolicLink()) throw new Error(`包内成员为符号链接，已拒绝解包（fail-closed）: ${path.relative(dir, full)}`)
+      if (st.isDirectory()) stack.push(full)
+    }
+  }
+}
+
 function extractZip(zipPath) {
   if (!fs.existsSync(zipPath)) throw new Error(`文件不存在: ${zipPath}`)
+  validateArchiveMembers(zipPath)
   const dir = stagingDir()
-  execTar(['-xf', zipPath, '-C', dir])
+  try {
+    execTar(['-xf', zipPath, '-C', dir])
+    assertNoLinkEntries(dir)
+  } catch (err) {
+    fs.rmSync(dir, { recursive: true, force: true })
+    throw err
+  }
   return dir
 }
 
@@ -384,6 +570,13 @@ function readManifestFromZip(zipPath) {
     if (!raw.trim()) throw new Error('包内缺少 manifest.json（不是 dsh-packer 生成的包）')
     const manifest = JSON.parse(raw)
     if (manifest.schemaVersion !== SCHEMA_VERSION) throw new Error(`清单版本不兼容（包 ${manifest.schemaVersion} vs 当前 ${SCHEMA_VERSION}）`)
+    if (!Array.isArray(manifest.files)) throw new Error('清单缺少 files 数组，已拒绝恢复（fail-closed）')
+    // 清单路径整体校验：任一条目非法即拒绝整包（避免半个包被应用）
+    for (const f of manifest.files) {
+      const mod = MODULES[f.module]
+      if (!mod) continue // 未知模块留给 diff/apply 逐条跳过
+      resolveTarget(mod, f.rel)
+    }
     return { manifest, dir }
   } catch (err) {
     fs.rmSync(dir, { recursive: true, force: true })
@@ -391,9 +584,35 @@ function readManifestFromZip(zipPath) {
   }
 }
 
+/**
+ * 清单 rel 白名单校验：显式拒绝绝对路径 / 盘符路径 / UNC / `..` 片段 / NUL。
+ * 打包时 rel 由相对遍历生成，绝不会出现这些形状——出现即为篡改。
+ */
+function assertSafeRel(rel) {
+  if (typeof rel !== 'string' || !rel) throw new Error('清单条目 rel 非法（空或非字符串），已拒绝恢复（fail-closed）')
+  if (rel.includes('\0')) throw new Error('清单条目 rel 含非法字符，已拒绝恢复（fail-closed）')
+  if (/^[A-Za-z]:/.test(rel)) throw new Error(`目标路径越界（盘符路径）: ${rel}，已拒绝恢复（fail-closed）`)
+  if (rel.startsWith('/') || rel.startsWith('\\')) throw new Error(`目标路径越界（绝对路径/UNC）: ${rel}，已拒绝恢复（fail-closed）`)
+  if (path.isAbsolute(rel)) throw new Error(`目标路径越界（绝对路径）: ${rel}，已拒绝恢复（fail-closed）`)
+  const segs = rel.split(/[\\/]/)
+  if (segs.includes('..')) throw new Error(`目标路径越界（含 .. 片段）: ${rel}，已拒绝恢复（fail-closed）`)
+  if (segs.some((s) => s === '')) throw new Error(`目标路径非法（空路径段）: ${rel}，已拒绝恢复（fail-closed）`)
+  return rel
+}
+
+/**
+ * 目标路径：先做 rel 白名单校验，再在 resolve 后校验前缀必须落在模块目标根内。
+ * file 类型模块：resolve() 即文件全路径；dir 类型：resolve() + rel。
+ */
 function resolveTarget(mod, rel) {
-  // file 类型模块：resolve() 即文件全路径；dir 类型：resolve() + rel
-  return mod.kind === 'file' ? mod.resolve() : path.join(mod.resolve(), rel)
+  assertSafeRel(rel)
+  const root = path.resolve(mod.resolve())
+  const target = mod.kind === 'file' ? root : path.resolve(root, rel)
+  const base = mod.kind === 'file' ? path.dirname(root) : root
+  if (!pathContained(base, target)) {
+    throw new Error(`目标路径越界（不在模块目标根内）: ${rel}，已拒绝恢复（fail-closed）`)
+  }
+  return target
 }
 
 function diffRestore(manifest) {
@@ -401,10 +620,20 @@ function diffRestore(manifest) {
   for (const f of manifest.files || []) {
     const mod = MODULES[f.module]
     if (!mod) { diff.skipped.push({ module: f.module, rel: f.rel, reason: '未知模块' }); continue }
-    const target = resolveTarget(mod, f.rel)
+    let target
+    try {
+      target = resolveTarget(mod, f.rel)
+    } catch (err) {
+      diff.skipped.push({ module: f.module, rel: f.rel, reason: String(err.message || err) })
+      continue
+    }
+    if (!isValidSha256(f.sha256)) {
+      diff.skipped.push({ module: f.module, rel: f.rel, reason: '清单缺少合法 SHA-256 指纹（fail-closed）' })
+      continue
+    }
     if (!fs.existsSync(target)) {
       diff.added.push({ module: f.module, rel: f.rel })
-    } else if (sha256(target) === f.sha256) {
+    } else if (trySha256(target) === f.sha256) {
       diff.same.push({ module: f.module, rel: f.rel })
     } else {
       diff.changed.push({ module: f.module, rel: f.rel })
@@ -427,58 +656,117 @@ function pathContained(base, target) {
   return t === b || t.startsWith(b + path.sep)
 }
 
-function applyRestore(manifest, { strategy = 'overwrite', moduleFilter = null } = {}) {
-  const stats = { overwritten: 0, added: 0, merged: 0, skipped: 0, failed: 0, failures: [] }
+/**
+ * 执行恢复：先备份目标 → 写临时文件 → rename 原子替换；任意环节失败即中止，
+ * 并按记录回滚已替换/已追加的文件（不再"失败只累计"）。
+ * memory 等模块的 SQLite 库默认排除（includeDb=true 才恢复）。
+ */
+function applyRestore(manifest, { strategy = 'overwrite', moduleFilter = null, includeDb = false, backupRoot = null } = {}) {
+  const stats = {
+    overwritten: 0, added: 0, merged: 0, skipped: 0, failed: 0, failures: [],
+    excluded: [], aborted: false, rolledBack: 0, rollbackFailures: [], backupDir: null,
+  }
+  const applied = []
+  let backupDir = null
+  let seq = 0
+  const ensureBackupDir = () => {
+    if (!backupDir) {
+      const root = backupRoot || path.join(PACKS_DIR, '.restore-backups')
+      backupDir = path.join(root, `${nowStamp()}-${uniqueSuffix()}`)
+      fs.mkdirSync(backupDir, { recursive: true })
+      stats.backupDir = backupDir
+    }
+    return backupDir
+  }
+  const backupTarget = (target) => {
+    const dest = path.join(ensureBackupDir(), `${String(seq++).padStart(4, '0')}-${path.basename(target)}`)
+    fs.copyFileSync(target, dest)
+    return dest
+  }
+  const rollback = () => {
+    for (const rec of applied.reverse()) {
+      try {
+        if (rec.backup && fs.existsSync(rec.backup)) {
+          const tmp = `${rec.target}.packer-rb-${uniqueSuffix()}`
+          fs.copyFileSync(rec.backup, tmp)
+          fs.renameSync(tmp, rec.target) // 原子还原
+        } else {
+          fs.rmSync(rec.target, { force: true })
+        }
+        if (rec.kind === 'overwrite') stats.overwritten--
+        else if (rec.kind === 'merge') stats.merged--
+        else stats.added--
+        stats.rolledBack++
+      } catch (err) {
+        stats.rollbackFailures.push({ target: rec.target, error: String(err.message || err) })
+      }
+    }
+  }
+
   for (const f of manifest.files || []) {
     if (moduleFilter && !moduleFilter.includes(f.module)) continue
     const mod = MODULES[f.module]
     if (!mod) { stats.skipped++; continue }
-    const target = resolveTarget(mod, f.rel)
     try {
-      // 安全校验（fail-closed）：src 必须在解压目录内 + 与清单 SHA-256 一致，
-      // 防包/清单被篡改后越界恢复或恢复被替换的文件
+      // 目标路径校验（fail-closed）：rel 白名单 + 落在模块目标根内
+      const target = resolveTarget(mod, f.rel)
+      if (!includeDb && DB_FILE_RE.test(path.basename(target))) {
+        stats.skipped++
+        stats.excluded.push({ rel: f.rel, reason: 'SQLite 数据库（含 WAL/SHM）默认不恢复，避免覆盖运行中的记忆数据' })
+        continue
+      }
+      // 清单指纹必须存在且合法：缺指纹/格式非法一律拒绝（不再"缺指纹即放行"）
+      if (!isValidSha256(f.sha256)) {
+        throw new Error('清单条目缺少合法 SHA-256 指纹，已拒绝恢复（fail-closed）')
+      }
+      // 源侧校验：必须在解压目录内 + 与清单 SHA-256 一致
       const src = path.resolve(manifest._dir, f.module, f.rel)
-      if (!pathContained(manifest._dir, src)) {
-        stats.failed++
-        stats.failures.push({ rel: f.rel, error: '包内路径越界，已拒绝恢复（fail-closed）' })
-        continue
-      }
-      if (!fs.existsSync(src)) {
-        stats.failed++
-        stats.failures.push({ rel: f.rel, error: '包内源文件缺失' })
-        continue
-      }
+      if (!pathContained(manifest._dir, src)) throw new Error('包内路径越界，已拒绝恢复（fail-closed）')
+      if (!fs.existsSync(src)) throw new Error('包内源文件缺失')
       const srcHash = sha256(src)
-      if (f.sha256 && srcHash !== f.sha256) {
-        stats.failed++
-        stats.failures.push({ rel: f.rel, error: `源文件完整性校验失败（${f.sha256} ≠ ${srcHash}），已拒绝恢复（fail-closed）` })
-        continue
+      if (srcHash !== f.sha256) {
+        throw new Error(`源文件完整性校验失败（${f.sha256} ≠ ${srcHash}），已拒绝恢复（fail-closed）`)
       }
       if (fs.existsSync(target)) {
-        if (sha256(target) === f.sha256) { stats.skipped++; continue } // 相同跳过
+        if (trySha256(target) === f.sha256) { stats.skipped++; continue } // 相同跳过
         if (strategy === 'skip') { stats.skipped++; continue }
         if (strategy === 'merge' && isTextFile(target)) {
           if (isStructuredFile(target)) {
             // 结构化配置（JSON/YAML）禁用通用 append merge：拼接即坏文件
-            stats.failed++
-            stats.failures.push({ rel: f.rel, error: '结构化配置文件不支持 append merge（会破坏语法），请改用 overwrite 策略或手工合并' })
-            continue
+            throw new Error('结构化配置文件不支持 append merge（会破坏语法），请改用 overwrite 策略或手工合并')
           }
-          // 合并：追加带分隔的源内容（不覆盖）
+          const backup = backupTarget(target)
           const sep = `\n<!-- merged from dsh-packer pack ${manifest.createdAt} -->\n`
           fs.appendFileSync(target, sep + readFile(src), 'utf-8')
+          applied.push({ target, backup, kind: 'merge' })
           stats.merged++
           continue
         }
       }
-      fs.mkdirSync(path.dirname(target), { recursive: true })
       const existed = fs.existsSync(target)
-      fs.copyFileSync(src, target)
-      if (existed) stats.overwritten++
-      else stats.added++
+      const backup = existed ? backupTarget(target) : null
+      fs.mkdirSync(path.dirname(target), { recursive: true })
+      const tmp = `${target}.packer-tmp-${uniqueSuffix()}`
+      try {
+        fs.copyFileSync(src, tmp)
+        fs.renameSync(tmp, target) // 原子替换，写到一半不会留下半个文件
+      } catch (err) {
+        fs.rmSync(tmp, { force: true }) // 失败不残留临时文件
+        throw err
+      }
+      if (existed) {
+        applied.push({ target, backup, kind: 'overwrite' })
+        stats.overwritten++
+      } else {
+        applied.push({ target, backup, kind: 'add' })
+        stats.added++
+      }
     } catch (err) {
       stats.failed++
       stats.failures.push({ rel: f.rel, error: String(err.message || err) })
+      stats.aborted = true
+      rollback() // 任一环节失败即中止并回滚
+      break
     }
   }
   return stats
@@ -521,10 +809,11 @@ function registerPackCommand(ctx) {
               modules = Object.keys(MODULES).filter((m) => MODULES[m][mode === 'share' ? 'share' : 'default'])
             }
             const r = createPack({ modules, mode, note, dryRun })
+            const unreadableNote = r.unreadable?.length ? `\n（${r.unreadable.length} 个文件读不出内容已跳过，未写入指纹）` : ''
             if (dryRun) {
-              return { kind: 'success', text: `【预览】模块 ${r.manifest.modules.join(', ')} · ${r.manifest.files.length} 文件 · ${Math.round(r.totalBytes / 1024)}KB\n隐私扫描：${r.privacy.length ? r.privacy.map((p) => `- ${p.label} @ ${p.file}`).join('\n') : '无发现'}` }
+              return { kind: 'success', text: `【预览】模块 ${r.manifest.modules.join(', ')} · ${r.manifest.files.length} 文件 · ${Math.round(r.totalBytes / 1024)}KB\n隐私扫描：${r.privacy.length ? r.privacy.map((p) => `- ${formatFinding(p)}`).join('\n') : '无发现'}${unreadableNote}` }
             }
-            return { kind: 'success', text: `已生成 ${r.pack.name}（${r.pack.fileCount} 文件 · ${Math.round(r.pack.totalBytes / 1024)}KB${r.pack.note ? ' · ' + r.pack.note : ''}）` }
+            return { kind: 'success', text: `已生成 ${r.pack.name}（${r.pack.fileCount} 文件 · ${Math.round(r.pack.totalBytes / 1024)}KB${r.pack.note ? ' · ' + r.pack.note : ''}）${unreadableNote}` }
           }
           if (verb === 'scan') {
             const files = []
@@ -532,9 +821,10 @@ function registerPackCommand(ctx) {
               for (const f of collectModuleFiles(MODULES[m])) files.push(f)
             }
             const findings = privacyScan(files)
+            const total = countFindings(findings)
             return {
               kind: 'success',
-              text: findings.length ? `发现 ${findings.length} 处敏感痕迹：\n` + findings.slice(0, 15).map((f) => `- ${f.label} @ ${f.file}${f.line ? ':' + f.line : ''}`).join('\n') : '未发现敏感痕迹',
+              text: total ? `发现 ${total} 处敏感痕迹（${findings.length} 个命中点）：\n` + findings.slice(0, 15).map((f) => `- ${formatFinding(f)}`).join('\n') : '未发现敏感痕迹',
             }
           }
           if (verb === 'restore') {
@@ -545,13 +835,21 @@ function registerPackCommand(ctx) {
               if (rest[i] === '--strategy' && rest[i + 1]) { strategy = rest[i + 1]; i++ }
             }
             const { manifest, dir } = readManifestFromZip(zip)
-            manifest._dir = dir
-            const diff = diffRestore(manifest)
-            const stats = applyRestore(manifest, { strategy })
-            fs.rmSync(dir, { recursive: true, force: true })
-            return {
-              kind: 'success',
-              text: `恢复完成（策略 ${strategy}）：新增 ${diff.added.length} · 变更 ${stats.overwritten} · 合并 ${stats.merged} · 跳过 ${stats.skipped}${stats.failed ? ' · 失败 ' + stats.failed : ''}`,
+            try {
+              manifest._dir = dir
+              const stats = applyRestore(manifest, { strategy })
+              const parts = [
+                `恢复完成（策略 ${strategy}）：新增 ${stats.added} · 覆盖 ${stats.overwritten} · 合并 ${stats.merged} · 跳过 ${stats.skipped}`,
+              ]
+              if (stats.failed) parts.push(`失败 ${stats.failed}${stats.aborted ? '（已中止）' : ''}`)
+              if (stats.rolledBack) parts.push(`已回滚 ${stats.rolledBack} 个文件`)
+              if (stats.rollbackFailures.length) parts.push(`回滚失败 ${stats.rollbackFailures.length}`)
+              if (stats.excluded.length) parts.push(`未恢复 SQLite 库 ${stats.excluded.length} 个（默认排除）`)
+              if (stats.backupDir) parts.push(`备份：${stats.backupDir}`)
+              const detail = stats.failures.length ? '\n' + stats.failures.map((f) => `- ${f.rel}: ${f.error}`).join('\n') : ''
+              return { kind: 'success', text: parts.join(' · ') + detail }
+            } finally {
+              fs.rmSync(dir, { recursive: true, force: true }) // 无论成败都清理临时解压目录
             }
           }
           return { kind: 'success', text: '用法: /pack list | create [--modules a,b] [--mode migrate|share] [--note 备注] [--dry-run] | restore <zip> [--strategy overwrite|skip|merge] | scan' }
@@ -609,7 +907,7 @@ export function apply(ctx, config = {}) {
             const files = []
             for (const m of body.modules || []) {
               if (!MODULES[m]) continue
-              for (const f of collectModuleFiles(MODULES[m], share)) files.push({ module: m, rel: f.rel, size: fs.statSync(f.abs).size })
+              for (const f of collectModuleFiles(MODULES[m], share)) files.push({ module: m, rel: f.rel, size: fileSize(f.abs) })
             }
             const findings = privacyScan(files)
             return send(200, { ok: true, files, privacy: findings, share })
@@ -634,19 +932,29 @@ export function apply(ctx, config = {}) {
           if (req.method === 'POST' && p === '/restore/import') {
             const body = JSON.parse(await readBody())
             const { manifest, dir } = readManifestFromZip(body.zip)
-            manifest._dir = dir
-            const diff = diffRestore(manifest)
-            fs.rmSync(dir, { recursive: true, force: true })
-            return send(200, { ok: true, manifest: { ...manifest, files: undefined }, diff })
+            try {
+              manifest._dir = dir
+              const diff = diffRestore(manifest)
+              return send(200, { ok: true, manifest: { ...manifest, files: undefined }, diff })
+            } finally {
+              fs.rmSync(dir, { recursive: true, force: true }) // 失败也要清理临时解压目录
+            }
           }
           // POST /restore/apply → 执行恢复
           if (req.method === 'POST' && p === '/restore/apply') {
             const body = JSON.parse(await readBody())
             const { manifest, dir } = readManifestFromZip(body.zip)
-            manifest._dir = dir
-            const stats = applyRestore(manifest, { strategy: body.strategy || 'overwrite', moduleFilter: body.modules || null })
-            fs.rmSync(dir, { recursive: true, force: true })
-            return send(200, { ok: true, stats })
+            try {
+              manifest._dir = dir
+              const stats = applyRestore(manifest, {
+                strategy: body.strategy || 'overwrite',
+                moduleFilter: body.modules || null,
+                includeDb: body.includeDb === true,
+              })
+              return send(200, { ok: true, stats })
+            } finally {
+              fs.rmSync(dir, { recursive: true, force: true }) // 失败也要清理临时解压目录
+            }
           }
           return send(404, { ok: false, error: 'not found' })
         } catch (err) {
@@ -678,6 +986,15 @@ export const __internals = {
   applyRestore,
   buildManifest,
   sha256,
+  isValidSha256,
+  isTextFile,
+  countFindings,
   stagingDir,
   pathContained,
+  assertSafeRel,
+  resolveTarget,
+  validateArchiveMembers,
+  assertNoLinkEntries,
+  extractZip,
+  DB_FILE_RE,
 }

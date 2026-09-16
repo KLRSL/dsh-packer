@@ -4,6 +4,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import zlib from 'node:zlib'
+import { execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 
 // 隔离环境：DSH_HOME / PACKS_DIR / DSH_MEMORY_ROOT 全部指向临时目录
@@ -303,4 +305,242 @@ test('清单指纹：sha256 稳定', () => {
   const b = I.sha256(p)
   assert.equal(a, b)
   assert.match(a, /^[0-9a-f]{64}$/)
+})
+
+// ============================================================================
+// v0.2.3 安全加固：目标路径 containment / 指纹 fail-closed / 备份回滚 / 解包白名单
+// ============================================================================
+
+test('sha256：文件不存在必须抛错（绝不返回空串，否则完整性校验被静默跳过）', () => {
+  assert.throws(() => I.sha256(path.join(tmpRoot, 'no-such-file.bin')))
+  assert.equal(I.isValidSha256(''), false)
+  assert.equal(I.isValidSha256('not-a-hash'), false)
+  assert.equal(I.isValidSha256('a'.repeat(64)), true)
+})
+
+test('路径白名单：绝对路径 / 盘符 / UNC / .. 片段一律拒绝', () => {
+  for (const bad of ['/etc/passwd', 'C:\\Windows\\x.txt', 'C:/Windows/x.txt', 'C:x.txt', '\\\\server\\share\\x', '//server/share/x', '..', '../x', 'a/../../x', 'a//b', 'memory/']) {
+    assert.throws(() => I.assertSafeRel(bad), /越界|非法/, `应拒绝: ${bad}`)
+  }
+  for (const ok of ['settings.yaml', 'memory/SKILL.md', 'a/b/c.txt', '.env']) {
+    assert.equal(I.assertSafeRel(ok), ok)
+  }
+})
+
+test('恢复：目标路径越界（../ 逃出模块根）被拒绝且不写盘', () => {
+  const r = I.createPack({ modules: ['skills'], mode: 'migrate' })
+  const { manifest, dir } = I.readManifestFromZip(path.join(I.PACKS_DIR, r.pack.name))
+  manifest._dir = dir
+  const sha = manifest.files.find((f) => f.rel === 'memory/SKILL.md').sha256
+  // rel 合法时源侧也在解压目录内，但目标会落到 HOME 根（模块根之外）→ 必须拒绝
+  const evil = { ...manifest, files: [{ module: 'skills', rel: '../escape-target.txt', sha256: sha }] }
+  const stats = I.applyRestore(evil, { strategy: 'overwrite' })
+  assert.equal(stats.failed, 1)
+  assert.ok(/越界/.test(stats.failures[0].error))
+  assert.ok(!fs.existsSync(path.join(fakeHome, 'escape-target.txt')), '不得写出模块目标根之外')
+  assert.ok(!fs.existsSync(path.join(tmpRoot, 'escape-target.txt')))
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('恢复：清单缺 / 非法 SHA-256 指纹一律 fail-closed 拒绝（不复制）', () => {
+  const r = I.createPack({ modules: ['settings'], mode: 'migrate' })
+  const { manifest, dir } = I.readManifestFromZip(path.join(I.PACKS_DIR, r.pack.name))
+  manifest._dir = dir
+  fs.writeFileSync(path.join(fakeHome, 'settings.yaml'), 'untouched-marker\n')
+  for (const bad of [undefined, null, '', 'not-a-hash', 'abc123']) {
+    const evil = { ...manifest, files: [{ module: 'settings', rel: 'settings.yaml', sha256: bad }] }
+    const stats = I.applyRestore(evil, { strategy: 'overwrite' })
+    assert.equal(stats.failed, 1, `sha256=${String(bad)} 必须被拒绝`)
+    assert.equal(stats.overwritten, 0)
+    assert.equal(stats.added, 0)
+    assert.ok(/指纹|fail-closed/.test(stats.failures[0].error))
+    assert.equal(
+      fs.readFileSync(path.join(fakeHome, 'settings.yaml'), 'utf-8'),
+      'untouched-marker\n',
+      '目标文件不得被改动',
+    )
+  }
+  fs.writeFileSync(path.join(fakeHome, 'settings.yaml'), 'agent-default-model:\n  provider: deepseek-official\n')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('恢复：中途失败即中止，并按记录回滚已新增/已覆盖的文件', () => {
+  const r = I.createPack({ modules: ['skills'], mode: 'migrate' })
+  const { manifest, dir } = I.readManifestFromZip(path.join(I.PACKS_DIR, r.pack.name))
+  manifest._dir = dir
+  const byRel = new Map(manifest.files.map((f) => [f.rel, f]))
+  // 第一个：目标不存在 → 新增；第二个：目标存在且不同 → 覆盖（先备份）；第三个：缺指纹 → 中止
+  fs.rmSync(path.join(fakeHome, 'skills', '_shared', 'common.md'), { force: true })
+  fs.writeFileSync(path.join(fakeHome, 'skills', 'pet', 'SKILL.md'), 'rolled-back-original\n')
+  const evil = {
+    ...manifest,
+    files: [
+      { module: 'skills', rel: '_shared/common.md', sha256: byRel.get('_shared/common.md').sha256 },
+      { module: 'skills', rel: 'pet/SKILL.md', sha256: byRel.get('pet/SKILL.md').sha256 },
+      { module: 'skills', rel: 'memory/SKILL.md', sha256: 'broken' },
+    ],
+  }
+  const stats = I.applyRestore(evil, { strategy: 'overwrite' })
+  assert.equal(stats.aborted, true)
+  assert.equal(stats.failed, 1)
+  assert.equal(stats.added, 0, '新增计数应随回滚归零')
+  assert.equal(stats.overwritten, 0, '覆盖计数应随回滚归零')
+  assert.equal(stats.rolledBack, 2)
+  assert.ok(!fs.existsSync(path.join(fakeHome, 'skills', '_shared', 'common.md')), '新增文件必须被回滚删除')
+  assert.equal(
+    fs.readFileSync(path.join(fakeHome, 'skills', 'pet', 'SKILL.md'), 'utf-8'),
+    'rolled-back-original\n',
+    '被覆盖文件必须由备份还原',
+  )
+  assert.ok(stats.backupDir && fs.existsSync(stats.backupDir), '恢复前必须留下备份')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('SQLite 数据库：默认不打包、默认不恢复', () => {
+  fs.writeFileSync(path.join(fakeMemory, 'biomemory.db'), 'SQLite format 3\u0000')
+  const rels = I.collectModuleFiles(I.MODULES.memory).map((f) => f.rel)
+  assert.ok(!rels.some((x) => /\.db/.test(x)), '内存模块不得收集 SQLite 库')
+
+  const r = I.createPack({ modules: ['skills'], mode: 'migrate' })
+  const { manifest, dir } = I.readManifestFromZip(path.join(I.PACKS_DIR, r.pack.name))
+  manifest._dir = dir
+  const stats = I.applyRestore(
+    { ...manifest, files: [{ module: 'memory', rel: 'biomemory.db', sha256: manifest.files[0].sha256 }] },
+    { strategy: 'overwrite' },
+  )
+  assert.equal(stats.skipped, 1)
+  assert.equal(stats.excluded.length, 1)
+  assert.equal(stats.failed, 0)
+  assert.equal(fs.readFileSync(path.join(fakeMemory, 'biomemory.db'), 'utf-8'), 'SQLite format 3\u0000')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('打包文件名：同一秒内两次打包不互相覆盖', () => {
+  const a = I.createPack({ modules: ['settings'], mode: 'migrate' })
+  const b = I.createPack({ modules: ['settings'], mode: 'migrate' })
+  assert.notEqual(a.pack.name, b.pack.name)
+  assert.ok(fs.existsSync(path.join(I.PACKS_DIR, a.pack.name)))
+  assert.ok(fs.existsSync(path.join(I.PACKS_DIR, b.pack.name)))
+})
+
+/** 最小 STORED zip 写入器：用于构造"成员名越界"的恶意包做解包白名单测试 */
+function makeZip(entries) {
+  const parts = []
+  const central = []
+  let offset = 0
+  for (const e of entries) {
+    const name = Buffer.from(e.name, 'utf-8')
+    const data = Buffer.from(e.data ?? '', 'utf-8')
+    const crc = zlib.crc32(data)
+    const local = Buffer.alloc(30)
+    local.writeUInt32LE(0x04034b50, 0)
+    local.writeUInt16LE(20, 4)
+    local.writeUInt16LE(0, 6)
+    local.writeUInt16LE(0, 8) // stored
+    local.writeUInt16LE(0, 10)
+    local.writeUInt16LE(0, 12)
+    local.writeUInt32LE(crc, 14)
+    local.writeUInt32LE(data.length, 18)
+    local.writeUInt32LE(data.length, 22)
+    local.writeUInt16LE(name.length, 26)
+    local.writeUInt16LE(0, 28)
+    parts.push(local, name, data)
+
+    const cd = Buffer.alloc(46)
+    cd.writeUInt32LE(0x02014b50, 0)
+    cd.writeUInt16LE(20, 4)
+    cd.writeUInt16LE(20, 6)
+    cd.writeUInt32LE(crc, 16)
+    cd.writeUInt32LE(data.length, 20)
+    cd.writeUInt32LE(data.length, 24)
+    cd.writeUInt16LE(name.length, 28)
+    cd.writeUInt32LE(0, 38) // external attrs：普通文件
+    cd.writeUInt32LE(offset, 42)
+    central.push(cd, name)
+    offset += local.length + name.length + data.length
+  }
+  const cdBuf = Buffer.concat(central)
+  const eocd = Buffer.alloc(22)
+  eocd.writeUInt32LE(0x06054b50, 0)
+  eocd.writeUInt16LE(entries.length, 8)
+  eocd.writeUInt16LE(entries.length, 10)
+  eocd.writeUInt32LE(cdBuf.length, 12)
+  eocd.writeUInt32LE(offset, 16)
+  return Buffer.concat([...parts, cdBuf, eocd])
+}
+
+test('解包：合法包通过成员白名单校验', () => {
+  const r = I.createPack({ modules: ['settings'], mode: 'migrate' })
+  const names = I.validateArchiveMembers(path.join(I.PACKS_DIR, r.pack.name))
+  assert.ok(names.some((n) => n.replace(/^\.\//, '') === 'manifest.json'))
+})
+
+test('解包：成员名越界（../ 或绝对路径）被白名单拒绝且不解压', () => {
+  for (const bad of ['../escape-via-zip.txt', 'sub/../../escape-via-zip.txt']) {
+    const evil = path.join(tmpRoot, `evil-${bad.replace(/[^a-z]/gi, '_')}.zip`)
+    fs.writeFileSync(evil, makeZip([{ name: bad, data: 'pwned' }]))
+    assert.throws(() => I.validateArchiveMembers(evil), /越界|非法|成员/)
+    assert.throws(() => I.extractZip(evil), /越界|非法|成员/)
+    assert.ok(!fs.existsSync(path.join(tmpRoot, 'escape-via-zip.txt')), '不得解压到包外')
+  }
+})
+
+test('解包：符号链接成员被类型白名单拒绝（防链接逃逸）', () => {
+  const stage = path.join(tmpRoot, 'link-stage')
+  fs.mkdirSync(stage, { recursive: true })
+  fs.writeFileSync(path.join(stage, 'ok.txt'), 'ok\n')
+  try {
+    fs.symlinkSync('../../outside-secret', path.join(stage, 'escape-link'), 'file')
+  } catch {
+    return // 本机不允许建符号链接（无权限）→ 跳过该断言
+  }
+  const tarPath = path.join(tmpRoot, 'with-link.tar')
+  execFileSync('tar', ['-cf', tarPath, '-C', stage, '.'])
+  assert.throws(() => I.validateArchiveMembers(tarPath), /成员类型|fail-closed/)
+})
+
+test('解包：解压结果出现符号链接即拒绝（第二层检查）', () => {
+  const out = path.join(tmpRoot, 'link-out')
+  fs.mkdirSync(out, { recursive: true })
+  try {
+    fs.symlinkSync('../../outside-secret', path.join(out, 'l'), 'file')
+  } catch {
+    return
+  }
+  assert.throws(() => I.assertNoLinkEntries(out), /符号链接/)
+})
+
+test('隐私扫描：Unix / UNC 路径、无引号密钥、密钥形状、.env 文件都被识别', () => {
+  const p = path.join(tmpRoot, 'privacy-probe.txt')
+  fs.writeFileSync(p, [
+    'unix: /home/alice/.config/dsh/settings.yaml',
+    'unc: \\\\fileserver\\share\\secrets.txt',
+    'unquoted: api_key=abcdef1234567890',
+    'shape: sk-abcdefghijklmnopqrstuvwxyz0123',
+    'aws: AKIAIOSFODNN7EXAMPLE',
+    'jwt: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U',
+    '',
+  ].join('\n'))
+  const ids = new Set(I.privacyScan([{ rel: 'privacy-probe.txt', abs: p }]).map((h) => h.pattern))
+  for (const id of ['unix-path', 'unc-path', 'credential', 'key-shape']) {
+    assert.ok(ids.has(id), `应命中规则 ${id}（实际：${[...ids].join(',')}）`)
+  }
+  // 无扩展名的点文件（.env）必须纳入扫描
+  const env = path.join(tmpRoot, '.env')
+  fs.writeFileSync(env, 'OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwx\n')
+  const envHits = I.privacyScan([{ rel: '.env', abs: env }])
+  assert.ok(envHits.length >= 1, '.env 必须被扫描')
+  // 二进制仍跳过
+  const bin = path.join(tmpRoot, 'blob.dat')
+  fs.writeFileSync(bin, Buffer.from([0x00, 0x01, 0x02, 0x00, 0xff]))
+  assert.equal(I.privacyScan([{ rel: 'blob.dat', abs: bin }]).length, 0)
+})
+
+test('隐私扫描：同一行多处命中全量计数（不再每规则只算 1 次）', () => {
+  const p = path.join(tmpRoot, 'multi-hit.txt')
+  fs.writeFileSync(p, 'D:\\a\\one.txt 与 D:\\a\\two.txt 以及 D:\\a\\three.txt\n')
+  const hits = I.privacyScan([{ rel: 'multi-hit.txt', abs: p }]).filter((h) => h.pattern === 'abs-path')
+  assert.equal(hits.length, 1, '同一行聚合为一条')
+  assert.equal(hits[0].count, 3)
+  assert.equal(I.countFindings(hits), 3)
 })

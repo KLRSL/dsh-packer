@@ -64,7 +64,7 @@ window.__ModuleLoader__.load({
 				renameFailed: "重命名失败",
 				restore: "恢复",
 				zipPath: "配置包 zip 路径",
-				zipPlaceholder: "例如 C:\\backup\\pack-YYYY-MM-DD.zip",
+				zipPlaceholder: "填写包文件名或完整位置（如本机 packs 目录下的包）",
 				zipHint: "填写本地 zip 文件的绝对路径，先「导入检查」查看差异",
 				importCheck: "导入检查",
 				importing: "检查中…",
@@ -152,7 +152,7 @@ window.__ModuleLoader__.load({
 				renameFailed: "Rename failed",
 				restore: "Restore",
 				zipPath: "Zip path",
-				zipPlaceholder: "e.g. C:\\backup\\pack-YYYY-MM-DD.zip",
+				zipPlaceholder: "Pack file name or full location on this machine",
 				zipHint: "Absolute path to a local zip. Run \"Import check\" first.",
 				importCheck: "Import check",
 				importing: "Checking…",
@@ -667,15 +667,17 @@ window.__ModuleLoader__.load({
 			const [importResult, setImportResult] = react.useState(null);
 			const [strategy, setStrategy] = react.useState("overwrite");
 			const [applyResult, setApplyResult] = react.useState(null);
+			// 服务端错误消息（含隐私拦截原因 / fail-closed 拒绝原因）必须展示，不能只显示"失败"
+			const errMsg = (error) => (error && error.message ? error.message : String(error || ""));
+			const withDetail = (text, detail) => (detail ? `${text}（${detail}）` : text);
 			const loadStatus = react.useCallback(() => {
 				const controller = new AbortController();
 				fetch("/packer/api/status", {
 					credentials: "same-origin",
 					signal: controller.signal
 				}).then(async (response) => {
-					if (!response.ok) throw new Error("status unavailable");
-					const data = await response.json();
-					if (!data?.ok) throw new Error("status unavailable");
+					const data = await response.json().catch(() => null);
+					if (!data?.ok) throw new Error(data?.error || "status unavailable");
 					setStatus({ kind: "ready", value: data });
 					setPacks(data.packs || []);
 					const mods = data.modules || {};
@@ -689,7 +691,7 @@ window.__ModuleLoader__.load({
 						return init;
 					});
 				}).catch((error) => {
-					if (!(error instanceof DOMException && error.name === "AbortError")) setStatus({ kind: "error" });
+					if (!(error instanceof DOMException && error.name === "AbortError")) setStatus({ kind: "error", message: errMsg(error) });
 				});
 				return () => {
 					controller.abort();
@@ -720,12 +722,11 @@ window.__ModuleLoader__.load({
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({ modules, mode })
 				}).then(async (response) => {
-					if (!response.ok) throw new Error("scan failed");
-					const data = await response.json();
-					if (!data?.ok) throw new Error("scan failed");
+					const data = await response.json().catch(() => null);
+					if (!data?.ok) throw new Error(data?.error || "scan failed");
 					setScan({ kind: "done", files: data.files || [], privacy: data.privacy || [], share: data.share });
-				}).catch(() => {
-					setScan({ kind: "error" });
+				}).catch((error) => {
+					setScan({ kind: "error", message: errMsg(error) });
 				});
 			};
 			const runCreate = (dryRun) => {
@@ -741,17 +742,16 @@ window.__ModuleLoader__.load({
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({ modules, mode, note: note.trim(), dryRun })
 				}).then(async (response) => {
-					if (!response.ok) throw new Error("create failed");
-					const data = await response.json();
-					if (!data?.ok) throw new Error("create failed");
+					const data = await response.json().catch(() => null);
+					if (!data?.ok) throw new Error(data?.error || "create failed");
 					if (dryRun) {
 						setCreate({ kind: "done", dryRun: true, manifest: data.manifest || {}, privacy: data.privacy || [], totalBytes: data.totalBytes });
 					} else {
 						setCreate({ kind: "done", dryRun: false, pack: data.pack || {}, privacy: data.privacy || [] });
 						loadStatus();
 					}
-				}).catch(() => {
-					setCreate({ kind: "error", dryRun });
+				}).catch((error) => {
+					setCreate({ kind: "error", dryRun, message: errMsg(error) });
 				});
 			};
 			const removePack = (name) => {
@@ -762,13 +762,12 @@ window.__ModuleLoader__.load({
 					method: "DELETE",
 					credentials: "same-origin"
 				}).then(async (response) => {
-					if (!response.ok) throw new Error("delete failed");
-					const data = await response.json();
-					if (!data?.ok) throw new Error("delete failed");
+					const data = await response.json().catch(() => null);
+					if (!data?.ok) throw new Error(data?.error || "delete failed");
 					setPackMsg({ kind: "ok", text: t.deleteDone });
 					loadStatus();
-				}).catch(() => {
-					setPackMsg({ kind: "err", text: t.deleteFailed });
+				}).catch((error) => {
+					setPackMsg({ kind: "err", text: withDetail(t.deleteFailed, errMsg(error)) });
 				}).finally(() => {
 					setPackBusy(null);
 				});
@@ -784,13 +783,12 @@ window.__ModuleLoader__.load({
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({ from, to: to.trim() })
 				}).then(async (response) => {
-					if (!response.ok) throw new Error("rename failed");
-					const data = await response.json();
-					if (!data?.ok) throw new Error("rename failed");
+					const data = await response.json().catch(() => null);
+					if (!data?.ok) throw new Error(data?.error || "rename failed");
 					setPackMsg({ kind: "ok", text: t.renameDone });
 					loadStatus();
-				}).catch(() => {
-					setPackMsg({ kind: "err", text: t.renameFailed });
+				}).catch((error) => {
+					setPackMsg({ kind: "err", text: withDetail(t.renameFailed, errMsg(error)) });
 				}).finally(() => {
 					setPackBusy(null);
 				});
@@ -808,12 +806,11 @@ window.__ModuleLoader__.load({
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({ zip })
 				}).then(async (response) => {
-					if (!response.ok) throw new Error("import failed");
-					const data = await response.json();
-					if (!data?.ok) throw new Error("import failed");
+					const data = await response.json().catch(() => null);
+					if (!data?.ok) throw new Error(data?.error || "import failed");
 					setImportResult({ kind: "done", manifest: data.manifest || {}, diff: data.diff || {} });
-				}).catch(() => {
-					setImportResult({ kind: "error" });
+				}).catch((error) => {
+					setImportResult({ kind: "error", message: errMsg(error) });
 				});
 			};
 			const runApply = () => {
@@ -829,13 +826,12 @@ window.__ModuleLoader__.load({
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({ zip, strategy })
 				}).then(async (response) => {
-					if (!response.ok) throw new Error("apply failed");
-					const data = await response.json();
-					if (!data?.ok) throw new Error("apply failed");
+					const data = await response.json().catch(() => null);
+					if (!data?.ok) throw new Error(data?.error || "apply failed");
 					setApplyResult({ kind: "done", stats: data.stats || {} });
 					loadStatus();
-				}).catch(() => {
-					setApplyResult({ kind: "error" });
+				}).catch((error) => {
+					setApplyResult({ kind: "error", message: errMsg(error) });
 				});
 			};
 			if (status.kind === "loading") {
@@ -848,7 +844,7 @@ window.__ModuleLoader__.load({
 				return (0, react.createElement)("div", {
 					className: "pk-page",
 					"data-dsh-theme": dark ? 'dark' : 'light'
-				}, (0, react.createElement)("style", null, styles), (0, react.createElement)("h3", null, t.title), (0, react.createElement)("div", { className: "pk-status error" }, t.unavailable));
+				}, (0, react.createElement)("style", null, styles), (0, react.createElement)("h3", null, t.title), (0, react.createElement)("div", { className: "pk-status error" }, withDetail(t.unavailable, status.message)));
 			}
 			const mods = status.value.modules || {};
 			const moduleCards = MODULE_ORDER.map((name) => {
@@ -867,11 +863,13 @@ window.__ModuleLoader__.load({
 					return (0, react.createElement)("div", { className: "pk-status" }, t.scanning);
 				}
 				if (scan.kind === "error") {
-					return (0, react.createElement)("div", { className: "pk-status error" }, scan.noSelection ? t.noSelection : t.scanFailed);
+					return (0, react.createElement)("div", { className: "pk-status error" }, scan.noSelection ? t.noSelection : withDetail(t.scanFailed, scan.message));
 				}
 				const files = scan.files || [];
 				const privacy = scan.privacy || [];
-				return (0, react.createElement)("div", null, (0, react.createElement)("div", { className: "pk-summary" }, `${t.scanFiles.replace("{n}", String(files.length))}`), files.length === 0 ? (0, react.createElement)("div", { className: "pk-note" }, t.empty) : (0, react.createElement)("ul", { className: "pk-list" }, files.map((f, index) => (0, react.createElement)("li", { key: `${f.module}/${f.rel}-${index}` }, `${f.module}/${f.rel}  ${formatBytes(f.size)}`))), (0, react.createElement)("div", { className: "pk-subtitle" }, privacy.length === 0 ? (0, react.createElement)("span", { className: "pk-ok" }, t.privacyNone) : (0, react.createElement)("span", { className: scan.share ? "pk-err" : "pk-warn" }, `${t.privacyFound.replace("{n}", String(privacy.length))}${scan.share ? " · " + t.privacyHint : ""}`)), privacy.length === 0 ? null : (0, react.createElement)("ul", { className: scan.share ? "pk-privacy pk-privacy-error" : "pk-privacy" }, privacy.map((p, index) => (0, react.createElement)("li", { key: index }, (0, react.createElement)("div", { className: "pk-privacy-file" }, `${p.label || "?"} @ ${p.file}${p.line ? ":" + p.line : ""}`), p.sample ? (0, react.createElement)("div", { className: "pk-privacy-sample" }, p.sample) : null))));
+				// 命中总数按服务端 count 累加（同一行多处命中不再被算作 1 处）
+				const privacyTotal = privacy.reduce((sum, p) => sum + (p.count || 1), 0);
+				return (0, react.createElement)("div", null, (0, react.createElement)("div", { className: "pk-summary" }, `${t.scanFiles.replace("{n}", String(files.length))}`), files.length === 0 ? (0, react.createElement)("div", { className: "pk-note" }, t.empty) : (0, react.createElement)("ul", { className: "pk-list" }, files.map((f, index) => (0, react.createElement)("li", { key: `${f.module}/${f.rel}-${index}` }, `${f.module}/${f.rel}  ${formatBytes(f.size)}`))), (0, react.createElement)("div", { className: "pk-subtitle" }, privacy.length === 0 ? (0, react.createElement)("span", { className: "pk-ok" }, t.privacyNone) : (0, react.createElement)("span", { className: scan.share ? "pk-err" : "pk-warn" }, `${t.privacyFound.replace("{n}", String(privacyTotal))}${scan.share ? " · " + t.privacyHint : ""}`)), privacy.length === 0 ? null : (0, react.createElement)("ul", { className: scan.share ? "pk-privacy pk-privacy-error" : "pk-privacy" }, privacy.map((p, index) => (0, react.createElement)("li", { key: index }, (0, react.createElement)("div", { className: "pk-privacy-file" }, `${p.label || "?"} @ ${p.file}${p.line ? ":" + p.line : ""}${p.count > 1 ? `（×${p.count}）` : ""}`), p.sample ? (0, react.createElement)("div", { className: "pk-privacy-sample" }, p.sample) : null))));
 			})();
 			const createSection = (() => {
 				if (create === null) return null;
@@ -879,7 +877,7 @@ window.__ModuleLoader__.load({
 					return (0, react.createElement)("div", { className: "pk-status" }, create.dryRun ? t.previewing : t.creating);
 				}
 				if (create.kind === "error") {
-					return (0, react.createElement)("div", { className: "pk-status error" }, create.noSelection ? t.noSelection : create.dryRun ? t.previewFailed : t.createFailed);
+					return (0, react.createElement)("div", { className: "pk-status error" }, create.noSelection ? t.noSelection : withDetail(create.dryRun ? t.previewFailed : t.createFailed, create.message));
 				}
 				if (create.dryRun) {
 					const manifest = create.manifest || {};
@@ -907,7 +905,7 @@ window.__ModuleLoader__.load({
 					return (0, react.createElement)("div", { className: "pk-status" }, t.importing);
 				}
 				if (importResult.kind === "error") {
-					return (0, react.createElement)("div", { className: "pk-status error" }, importResult.noZip ? t.noZip : t.importFailed);
+					return (0, react.createElement)("div", { className: "pk-status error" }, importResult.noZip ? t.noZip : withDetail(t.importFailed, importResult.message));
 				}
 				const diff = importResult.diff || {};
 				const manifest = importResult.manifest || {};
@@ -939,7 +937,7 @@ window.__ModuleLoader__.load({
 					return (0, react.createElement)("div", { className: "pk-status" }, t.applying);
 				}
 				if (applyResult.kind === "error") {
-					return (0, react.createElement)("div", { className: "pk-status error" }, applyResult.noZip ? t.noZip : t.applyFailed);
+					return (0, react.createElement)("div", { className: "pk-status error" }, applyResult.noZip ? t.noZip : withDetail(t.applyFailed, applyResult.message));
 				}
 				const stats = applyResult.stats || {};
 				const failures = stats.failures || [];

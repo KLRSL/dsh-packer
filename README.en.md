@@ -4,7 +4,7 @@
 >
 > [简体中文](README.md) · [English](README.en.md)
 
-> **v0.2.2** · MIT License · DSH ≥ 0.1.1-rc.2 (adapted for 0.1.2-rc.1) · Node ≥ 22.19.0
+> **v0.2.3** · MIT License · DSH ≥ 0.1.1-rc.2 (prerelease versions are not bounded by semver ranges; tested on 0.1.5-rc.1) · Node ≥ 22.19.0
 
 **dsh-packer** is the Agent Configuration Packer plugin for **DeepSeek Harness (DSH)**: it packs your local Agent assets, module by module, into standard zip archives, for two purposes:
 
@@ -17,12 +17,13 @@ Every module is optional (Skills / Sessions / Profiles / Settings / Presets / Me
 
 | Feature | Description |
 | --- | --- |
-| Modular packing | Six modules, any combination: `skills` / `sessions` / `profiles` / `settings` / `presets` / `memory` |
+| Modular packing | Six modules, any combination: `skills` / `sessions` / `profiles` / `settings` / `presets` / `memory` (`memory` excludes live SQLite databases `*.db*` by default) |
 | Two built-in presets | **Migrate** (everything) / **Share** (Skills only; sessions, memory data and personal skill subdirectories are automatically excluded) |
-| Privacy & security scan | Detects local absolute paths, user-directory paths, suspected credentials and personal nicknames before packing; **share mode hard-blocks on any hit, migrate mode reports only** |
+| Privacy & security scan | Detects drive-letter / Unix / UNC paths, user-directory paths, credential assignments and bare key shapes (`sk-`, `ghp_`, `AKIA`, JWT, …), plus personal nicknames, counting **every occurrence**; **share mode hard-blocks on any hit, migrate mode reports only** |
 | File-level operation preview | Full file list preview before packing; diff report before restore (added / changed / same / skipped) |
 | Three conflict strategies | Overwrite / skip / merge (merge appends, never overwrites existing content) |
-| Manifest integrity check | `manifest.json` records schemaVersion plus a SHA-256 fingerprint per file; fail-closed validation before restore |
+| Safe restore writes | Targets are backed up to `.restore-backups/<timestamp>/` inside the packs directory first, written to a temp file and swapped in with an atomic `rename`; any failure **aborts and rolls back** the files already replaced/added |
+| Manifest integrity check | `manifest.json` records schemaVersion plus a SHA-256 fingerprint per file; source files are verified against it before restore, and a **missing or malformed fingerprint is rejected outright** (fail-closed) |
 | Pack management & notes | Pack list (time / size / modules / note), delete, rename, and a note written at pack time |
 | Share packs ship a README | A generated `README.md` describing the pack contents is attached automatically |
 | Dark-mode ready | The workflow panel follows the DSH theme via `--dsw-alias-*` variables (dual-channel detection) |
@@ -80,7 +81,7 @@ When it finishes, the zip is written to `~/.dsh/packs/` (override with `DSH_PACK
 /pack restore <zip-path> --strategy merge
 ```
 
-`manifest.json` is validated automatically (schemaVersion + SHA-256) before anything is applied; restart DSH if needed after applying.
+`manifest.json` is validated automatically (schemaVersion + fingerprint validity + every source file's SHA-256) before anything is applied; each target is backed up first and swapped in atomically, and a failure aborts the batch and rolls it back. Restart DSH if needed afterwards.
 
 ## Packable modules
 
@@ -91,7 +92,7 @@ When it finishes, the zip is written to `~/.dsh/packs/` (override with `DSH_PACK
 | `profiles` | Profile configs (excluding `node_modules`), under `~/.dsh/profiles` | ✅ | ❌ |
 | `settings` | Global settings (`settings.yaml`) | ✅ | ❌ |
 | `presets` | Agent presets (`.agent-presets`) | ✅ | ❌ |
-| `memory` | Memory data (`DSH_MEMORY_ROOT` or `~/.dsh/memory`, excluding `backups/`) | ✅ | ❌ |
+| `memory` | Memory data (`DSH_MEMORY_ROOT` or `~/.dsh/memory`, excluding `backups/` and live SQLite databases `*.db*`) | ✅ | ❌ |
 
 **The two built-in presets**:
 
@@ -100,15 +101,19 @@ When it finishes, the zip is written to `~/.dsh/packs/` (override with `DSH_PACK
 
 ## Privacy & security
 
-**Scan rules** (text files only):
+**Scan rules** (scope: files with known text extensions plus extensionless files that are clearly text, e.g. `.env`; binaries containing NUL bytes are skipped):
 
 | Rule | Description |
 | --- | --- |
-| Local absolute paths | Drive-letter style paths (e.g. `D:\...`, `/home/...`) |
-| User-directory paths | Paths under the operating system's user profile directory |
-| Suspected credentials / tokens | Assignments such as `api_key`, `secret`, `password`, `token`, `bearer`, `authorization` |
-| Personal nicknames | User nickname text |
-| Windows user-name paths | OS user names appearing in paths |
+| Local absolute paths (drive letter) | Drive-letter style paths such as `D:\...`, `C:/...` |
+| Unix absolute paths | `/home/...`, `/Users/...`, `/root/...`, `/etc/...`, `/tmp/...`, … |
+| UNC / network paths | `\\server\share\...` |
+| User-directory paths | Paths under the OS user profile directory (`C:\Users\<name>`, `/home/<name>`, `/Users/<name>`) |
+| Suspected credentials / tokens | Assignments such as `api_key`, `access_key`, `secret`, `password`, `token`, `bearer`, `authorization`, `credential` — **quoted or unquoted** |
+| Bare key shapes | The keys themselves: `sk-...`, `ghp_...`, `github_pat_...`, `glpat-...`, `AKIA...`, `xox?-...`, JWTs (`eyJ.....*.*`) |
+| Personal nicknames | User nickname text (injected by the deployer via `config.personalPatterns`) |
+
+Counts are tallied per file + rule + line, so multiple hits on one line are all counted (no more "one hit per rule per file").
 
 **Blocking policy**:
 
@@ -119,8 +124,12 @@ When it finishes, the zip is written to `~/.dsh/packs/` (override with `DSH_PACK
 
 Other security measures:
 
-- Every file's **SHA-256** fingerprint is recorded in `manifest.json` for fail-closed integrity checks on restore.
-- Restore paths are containment-checked (zip-slip / tampered manifests with `../` escapes are rejected).
+- Every file's **SHA-256** fingerprint is recorded in `manifest.json` for fail-closed integrity checks on restore; entries **without a well-formed fingerprint are rejected**, and files whose hash cannot be computed are skipped at pack time and reported (a blank fingerprint is never written).
+- Restore containment is **two-sided**: the source must stay inside the extraction directory and the target must stay inside its module root (zip-slip / tampered manifests with `../` escapes are rejected). Absolute paths, drive-letter paths, UNC paths and `..` segments are rejected by a whitelist before restore even starts.
+- Before unpacking, archive members are listed with `tar -tf` and whitelisted (absolute / drive-letter / UNC / `..` names rejected), and symlink / hardlink / device members are refused; the extracted tree is scanned again for symlinks. Temporary extraction directories are always cleaned up in `try/finally` — on success and on failure.
+- Targets are backed up first (`<packs>/.restore-backups/<timestamp>/`), written to a temp file and swapped in with an atomic `rename`; any failure aborts and rolls back what this run already replaced or added.
+- Live SQLite databases (`*.db`, `*.db-wal`, `*.db-shm`, `*.sqlite`) are neither packed nor restored by default — DSH / the memory plugin holds them, and overwriting can corrupt them.
+- Pack file names carry a unique suffix (`dsh-packer-<timestamp>-<random>-<mode>.zip`) so packs created within the same second never overwrite each other.
 - Packs are built with the system **bsdtar** (libarchive) — standard zips with **zero native npm dependencies**.
 
 ## Restore & diff
@@ -128,15 +137,17 @@ Other security measures:
 Restore flow:
 
 1. **Import the zip** — pick the file in the Settings tab, or `/pack restore <zip-path>`.
-2. **Manifest validation** — `manifest.json` exists, its schemaVersion is compatible, and every source file's SHA-256 matches the manifest; any mismatch is **fail-closed** (nothing is applied).
-3. **Diff report** — added / changed / same / skipped counts and file lists.
-4. **Pick a conflict strategy**:
+2. **Archive validation** — members are listed and whitelisted first (absolute / drive-letter / UNC / `..` / link-type members rejected), then `manifest.json` is read.
+3. **Manifest validation** — `manifest.json` exists, its schemaVersion is compatible, every entry has a well-formed SHA-256 fingerprint, and every source file's hash matches; any mismatch is **fail-closed**.
+4. **Diff report** — added / changed / same / skipped counts and file lists.
+5. **Pick a conflict strategy**:
    - `overwrite` — replace the target file with the pack's content (default);
    - `skip` — keep the target file and skip conflicting entries;
    - `merge` — for text files, **append** the pack's content to the end of the target behind a separator comment; existing content is never overwritten. Non-text files fall back to overwrite.
-5. Apply, and restart DSH if needed.
+6. **Backup → atomic swap → rollback on failure** — every target that will be replaced or appended to is backed up to `<packs>/.restore-backups/<timestamp>/` first, and the pack's content is written to a temp file and swapped in with an atomic `rename`; **any failure aborts the batch** and rolls back everything this run replaced or added (counts return to zero and the rolled-back number is reported separately).
+7. Apply, and restart DSH if needed.
 
-Files already identical to the pack are skipped automatically under every strategy. **Merge is not supported for structured configs** (JSON/YAML) — appending corrupts them; use overwrite or merge manually.
+Files already identical to the pack are skipped automatically under every strategy. **Merge is not supported for structured configs** (JSON/YAML) — appending corrupts them; use overwrite or merge manually. Live SQLite databases (`*.db*`) are skipped by default to avoid overwriting memory data.
 
 ## `/pack` command reference
 
@@ -155,7 +166,7 @@ Files already identical to the pack are skipped automatically under every strate
 | `restore` | `<zip-path>` the pack to restore; `--strategy overwrite\|skip\|merge` | Import zip → validate → diff report → apply with the chosen strategy |
 | `scan` | — | Runs the privacy scan over every packable module and reports sensitive traces |
 
-**Output directory**: packs are written to `~/.dsh/packs/` (override with `DSH_PACKS_DIR`); each pack also gets a same-name `.json` summary file in the same directory (time / modules / note / file count) for the list view and quick identification. Pack list, delete and rename are also available in the Settings → "Config Packer" tab.
+**Output directory**: packs are written to `~/.dsh/packs/` (override with `DSH_PACKS_DIR`); names look like `dsh-packer-<timestamp>-<random>-<mode>.zip` (the unique suffix keeps same-second packs from overwriting each other), and each pack also gets a same-name `.json` summary file in the same directory (time / modules / note / file count) for the list view and quick identification. Restore backups go to `.restore-backups/<timestamp>-<random>/` in that same directory (safe to delete at any time; neither the list nor the plugin reads it). Pack list, delete and rename are also available in the Settings → "Config Packer" tab.
 
 ## Configuration & environment variables
 
@@ -170,13 +181,15 @@ The Settings page's **"Config Packer"** tab (module checkboxes / preset switchin
 ## Compatibility
 
 - **Node.js** ≥ 22.19.0
-- **DSH packages** `@deepseek-ai/dsh-*` ≥ 0.1.1-rc.2 (current latest line; v0.2.2 is adapted for and tested on 0.1.2-rc.1; peer deps: `@deepseek-ai/cordis` ^4.0.2, `@deepseek-ai/dsh-tools` ≥0.1.1-rc.2, `@deepseek-ai/dsh-session` ≥0.1.1-rc.2)
-- **bsdtar**: Windows 10+ ships `tar.exe` (bsdtar/libarchive); on macOS `tar` is bsdtar. No npm native modules are used.
+- **DSH packages** `@deepseek-ai/dsh-*` ≥ 0.1.1-rc.2 (v0.2.3 is tested on 0.1.5-rc.1). **Note: prerelease versions are not bounded by semver ranges** — `>=0.1.1-rc.2` does not satisfy `0.1.5-rc.1` under node-semver rules (measured `satisfies=false`), so that range is a documented reference, not a version gate.
+- **Peer dependencies**: `@deepseek-ai/cordis` ^4.0.2 (plugin lifecycle baseline, provided by the host); `@deepseek-ai/dsh-tools` ≥0.1.1-rc.2 and `@deepseek-ai/dsh-session` ≥0.1.1-rc.2 are **not imported by `index.mjs`** — the plugin only uses host services such as `ctx.commands` / `ctx.webServer` / `ctx.slots`, taking both its command and HTTP entry points from the context. These two are therefore marked `optional: true` in `package.json`'s `peerDependenciesMeta` (the host always provides them, so no hard version check is needed); their ranges are likewise reference-only.
+- **bsdtar**: Windows 10+ ships `tar.exe` (bsdtar/libarchive); on macOS `tar` is bsdtar. No npm native modules are used. The local bsdtar rejects `..` members itself; the member whitelist runs before it, gives a clearer error, and also covers symlink members and other tar implementations.
 
 ## Version history
 
 | Version | Date | Type | Highlights |
 | --- | --- | --- | --- |
+| **v0.2.3** | 2026-09-16 | Security hardening | Target-path containment plus a `rel` whitelist on restore (absolute / drive-letter / UNC / `..` rejected); integrity made fail-closed (missing or malformed fingerprints rejected, `sha256()` now throws instead of returning `''`, streaming hash); archive members whitelisted via `tar -tf` before unpacking, link-type members refused, temp dirs always cleaned in `try/finally`; restore now backs up → temp file → atomic `rename` → abort-and-rollback on failure; `memory` module excludes `*.db*` by default; privacy scan gained Unix/UNC paths, unquoted credentials and bare key shapes, `.env`-style extensionless text, with per-line full counting; unique pack-name suffix; `peerDependenciesMeta` marks host-provided peers optional; the web UI now surfaces server-side error reasons |
 | **v0.2.2** | 2026-09-05 | Adaptation / UI | Adapted for DSH 0.1.2-rc.1; management panel redesigned on the "skeleton / flesh / breath" design language — packing-workflow layout (stage progress bar / equipment panel / diff color bands) + orange-amber-teal brand palette (packing & migration) + dark-mode support (follows DSH theme, dual-channel detection) |
 | **v0.2.1** | 2026-09-05 | UI refactor | Config Packer panel UI rebuilt — neutralSurface background + white cards (max-width 860 centered, radius 16), 4/8px grid spacing, restrained 150ms transitions; colors strictly from dsh-fuse default tokens (`--pk-*` variables, zero hardcoded values); diff report got four-column count badges + semantic color dots (added=green / changed=orange / same+skipped=muted); privacy risks default to a warning tint |
 | **v0.2.0** | 2026-09-05 | Security hardening | Privacy scan fixed: merged personal rules now actually participate in the loop; every source file is verified against its manifest SHA-256 before restoring (fail-closed); restore path containment (zip-slip / tampered-manifest escapes rejected); append-merge refused for structured configs (JSON/YAML — it corrupts them) |
@@ -200,6 +213,18 @@ Share mode is deliberately strict: any hit (absolute path, user-directory path, 
 **How does the merge strategy work?**
 
 For text files, the pack's content is **appended** to the target file behind a separator comment — existing content is never overwritten. Non-text files fall back to overwrite; structured configs (JSON/YAML) don't support merging at all (appending corrupts them) — use overwrite or merge manually. Files already identical to the pack are skipped under every strategy.
+
+**What does "aborted / rolled back" on restore mean?**
+
+Restore is all-or-nothing: if any step (path validation, fingerprint check, writing) fails, it stops immediately and rolls back the files this run already replaced or added, using the backups taken moments earlier. `rolled back N` reports how many files were restored; failure reasons are listed entry by entry in the Settings tab. Backups stay under `<packs>/.restore-backups/` for manual inspection.
+
+**Why wasn't my memory database (`*.db*`) restored?**
+
+Live SQLite databases are held open by DSH / the memory plugin, so overwriting them can corrupt data. The plugin neither packs nor restores `*.db`, `*.db-wal`, `*.db-shm` or `*.sqlite` by default; on restore they are counted as skipped with an explicit reason.
+
+**Restore says "entry is missing a valid SHA-256 fingerprint"?**
+
+The pack was not generated by dsh-packer, or its `manifest.json` was hand-edited. Missing or malformed fingerprints are rejected outright (fail-closed) — redistribute the original pack or regenerate it.
 
 **Where are packs stored?**
 
