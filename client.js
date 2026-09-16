@@ -670,10 +670,17 @@ window.__ModuleLoader__.load({
 			// 服务端错误消息（含隐私拦截原因 / fail-closed 拒绝原因）必须展示，不能只显示"失败"
 			const errMsg = (error) => (error && error.message ? error.message : String(error || ""));
 			const withDetail = (text, detail) => (detail ? `${text}（${detail}）` : text);
+			// 回退鉴权（api.authMode = "token"）时，服务端会把一次性令牌注入同源 index.html；
+			// 页面拿得到就带上（默认 "auto" 走官方会话鉴权，此时没有这个全局变量，行为不变）
+			const apiHeaders = (extra = {}) => {
+				const token = globalThis.__DSH_PACKER_TOKEN__;
+				return token ? { ...extra, "x-dsh-packer-token": token } : { ...extra };
+			};
 			const loadStatus = react.useCallback(() => {
 				const controller = new AbortController();
 				fetch("/packer/api/status", {
 					credentials: "same-origin",
+					headers: apiHeaders(),
 					signal: controller.signal
 				}).then(async (response) => {
 					const data = await response.json().catch(() => null);
@@ -719,7 +726,7 @@ window.__ModuleLoader__.load({
 				fetch("/packer/api/scan", {
 					method: "POST",
 					credentials: "same-origin",
-					headers: { "Content-Type": "application/json" },
+					headers: apiHeaders({ "Content-Type": "application/json" }),
 					body: JSON.stringify({ modules, mode })
 				}).then(async (response) => {
 					const data = await response.json().catch(() => null);
@@ -739,7 +746,7 @@ window.__ModuleLoader__.load({
 				fetch("/packer/api/create", {
 					method: "POST",
 					credentials: "same-origin",
-					headers: { "Content-Type": "application/json" },
+					headers: apiHeaders({ "Content-Type": "application/json" }),
 					body: JSON.stringify({ modules, mode, note: note.trim(), dryRun })
 				}).then(async (response) => {
 					const data = await response.json().catch(() => null);
@@ -760,7 +767,8 @@ window.__ModuleLoader__.load({
 				setPackMsg(null);
 				fetch("/packer/api/packs/" + encodeURIComponent(name), {
 					method: "DELETE",
-					credentials: "same-origin"
+					credentials: "same-origin",
+					headers: apiHeaders()
 				}).then(async (response) => {
 					const data = await response.json().catch(() => null);
 					if (!data?.ok) throw new Error(data?.error || "delete failed");
@@ -780,7 +788,7 @@ window.__ModuleLoader__.load({
 				fetch("/packer/api/packs/rename", {
 					method: "POST",
 					credentials: "same-origin",
-					headers: { "Content-Type": "application/json" },
+					headers: apiHeaders({ "Content-Type": "application/json" }),
 					body: JSON.stringify({ from, to: to.trim() })
 				}).then(async (response) => {
 					const data = await response.json().catch(() => null);
@@ -803,7 +811,7 @@ window.__ModuleLoader__.load({
 				fetch("/packer/api/restore/import", {
 					method: "POST",
 					credentials: "same-origin",
-					headers: { "Content-Type": "application/json" },
+					headers: apiHeaders({ "Content-Type": "application/json" }),
 					body: JSON.stringify({ zip })
 				}).then(async (response) => {
 					const data = await response.json().catch(() => null);
@@ -823,7 +831,7 @@ window.__ModuleLoader__.load({
 				fetch("/packer/api/restore/apply", {
 					method: "POST",
 					credentials: "same-origin",
-					headers: { "Content-Type": "application/json" },
+					headers: apiHeaders({ "Content-Type": "application/json" }),
 					body: JSON.stringify({ zip, strategy })
 				}).then(async (response) => {
 					const data = await response.json().catch(() => null);
