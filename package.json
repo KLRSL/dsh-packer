@@ -1,7 +1,7 @@
 {
   "name": "dsh-packer",
-  "description": "配置打包器（Agent config packer for DeepSeek Harness）：把本地 Agent 资产（Skills/会话/Profile/设置/记忆）按模块打包成 zip——迁移、分享、恢复、差异对比、隐私安全扫描，全部可选。v0.2.3：恢复安全加固（目标路径 containment / 缺指纹 fail-closed / 备份+原子替换+失败回滚 / tar 成员白名单 / SQLite 库默认排除）+ 隐私扫描补齐（Unix 与 UNC 路径、无引号密钥与密钥形状、全量计数、无扩展名文本）+ peerDependenciesMeta 标记宿主内建 peer 为 optional；v0.2.2：管理面板按打包工作流设计语言（阶段流程条/器材面板/diff 色带/橙琥珀青品牌色）+ 深色适配（DSH 主题跟随）",
-  "version": "0.2.3",
+  "description": "配置打包器（Agent config packer for DeepSeek Harness）：把本地 Agent 资产（Skills/会话/Profile/设置/记忆）按模块打包成 zip——迁移、分享、恢复、差异对比、隐私安全扫描，全部可选。v0.2.4：全链路异步 IO（fs/promises + execFile，不再阻塞事件循环，对外 API 一律返回 Promise）+ /packer/api/* 防护（鉴权默认 fail-closed：只用官方 connection.requestRejection，拿不到就 403；请求体上限 8MB 与速率限制 60 次/分钟在完整缓冲请求体之前判定；错误文案脱敏）、测试补齐；v0.2.3：恢复安全加固（目标路径 containment / 缺指纹 fail-closed / 备份+原子替换+失败回滚 / tar 成员白名单 / SQLite 库默认排除）+ 隐私扫描补齐（Unix 与 UNC 路径、无引号密钥与密钥形状、全量计数、无扩展名文本）+ peerDependenciesMeta 标记宿主内建 peer 为 optional；v0.2.2：管理面板按打包工作流设计语言（阶段流程条/器材面板/diff 色带/橙琥珀青品牌色）+ 深色适配（DSH 主题跟随）",
+  "version": "0.2.4",
   "type": "module",
   "main": "./index.mjs",
   "exports": {

@@ -4,7 +4,7 @@
 >
 > [简体中文](README.md) · [English](README.en.md)
 
-> **v0.2.3** · MIT License · DSH ≥ 0.1.1-rc.2 (prerelease versions are not bounded by semver ranges; tested on 0.1.5-rc.1) · Node ≥ 22.19.0
+> **v0.2.4** · MIT License · DSH ≥ 0.1.1-rc.2 (prerelease versions are not bounded by semver ranges; tested on 0.1.5-rc.1) · Node ≥ 22.19.0
 
 **dsh-packer** is the Agent Configuration Packer plugin for **DeepSeek Harness (DSH)**: it packs your local Agent assets, module by module, into standard zip archives, for two purposes:
 
@@ -131,6 +131,30 @@ Other security measures:
 - Live SQLite databases (`*.db`, `*.db-wal`, `*.db-shm`, `*.sqlite`) are neither packed nor restored by default — DSH / the memory plugin holds them, and overwriting can corrupt them.
 - Pack file names carry a unique suffix (`dsh-packer-<timestamp>-<random>-<mode>.zip`) so packs created within the same second never overwrite each other.
 - Packs are built with the system **bsdtar** (libarchive) — standard zips with **zero native npm dependencies**.
+- All file and subprocess work is asynchronous (`node:fs/promises` + `execFile`), with bounded concurrency (16 by default) for hashing and copying, so packing large trees never blocks DSH's event loop.
+
+### Settings Web API (`/packer/api/*`): auth & limits
+
+The Settings tab is a peer of the `/pack` command and talks to the plugin's own prefix route, `/packer/api/*`. That route is **fail-closed** by default, and the checks run in the order "rate limit → auth → body size → routing", with all three gates completed **before the request body is buffered**:
+
+| Item | Default | Behaviour |
+| --- | --- | --- |
+| Auth | `api.authMode: 'auto'` | **Official mechanism only**: `requestRejection(req)` on `ctx.get('connection')` (dsh-client-connection) — the same Host/Origin trust plus signed browser session check the official `/api` channel uses. `401` → 401, `403` → 403, only `undefined` lets the request through |
+| Auth service unavailable | **Hard 403** | If the `connection` service is missing, has no `requestRejection`, or throws, the request is rejected with 403 and a reason; the plugin **never silently falls back** to a weaker path (the built-in token channel requires opting in with `authMode: 'token'`) |
+| Rate limit | 60 / 60 s | **Outermost**: a sliding window keyed by client address (`remoteAddress`), evaluated before auth and before reading the body, so unauthenticated traffic consumes the same quota. Over the limit: 429 with `retry-after`; the key table is bounded (no timers, bounded memory) |
+| Body size limit | 8 MB | Decided **before the body is fully buffered**: a declared `Content-Length` over the limit is rejected with 413 without reading a single byte; without a length the body is counted while streaming and the connection is unbound, paused and answered with 413 the moment it exceeds the limit |
+| Error messages | Redacted | Server-side absolute paths (drive letter / UNC / Unix home dirs) are replaced with `<路径已隐去>` before leaving the process, so directory layout is never echoed to the browser |
+
+`api` options (`apply(ctx, { api: { ... } })`):
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `authMode` | `'auto'` | `'auto'`: official `connection` only, 403 when unavailable; `'token'`: **explicit opt-in** plugin-owned fallback — Host / Origin / `Sec-Fetch-Site` same-origin checks plus a one-time token (generated at `apply` time, injected into the same-origin `index.html` via `webServer.tapIndex`; the UI sends it as the `x-dsh-packer-token` header), for hosts that genuinely have no `connection` service; `'off'`: **insecure**, isolated tests only |
+| `maxBodyBytes` | `8388608` | Body size limit in bytes |
+| `rateLimit` / `rateWindowMs` | `60` / `60000` | Rate-limit count and window (ms) |
+| `token` | random | Only used with `authMode: 'token'`; pass one explicitly to pin it for multi-instance or test setups |
+
+`authMode: 'off'` and an explicitly pinned `token` hand the security decision to the deployer; they are documented so you know what you opted into, not because they are recommended.
 
 ## Restore & diff
 
@@ -181,7 +205,7 @@ The Settings page's **"Config Packer"** tab (module checkboxes / preset switchin
 ## Compatibility
 
 - **Node.js** ≥ 22.19.0
-- **DSH packages** `@deepseek-ai/dsh-*` ≥ 0.1.1-rc.2 (v0.2.3 is tested on 0.1.5-rc.1). **Note: prerelease versions are not bounded by semver ranges** — `>=0.1.1-rc.2` does not satisfy `0.1.5-rc.1` under node-semver rules (measured `satisfies=false`), so that range is a documented reference, not a version gate.
+- **DSH packages** `@deepseek-ai/dsh-*` ≥ 0.1.1-rc.2 (v0.2.4 is tested on 0.1.5-rc.1). **Note: prerelease versions are not bounded by semver ranges** — `>=0.1.1-rc.2` does not satisfy `0.1.5-rc.1` under node-semver rules (measured `satisfies=false`), so that range is a documented reference, not a version gate.
 - **Peer dependencies**: `@deepseek-ai/cordis` ^4.0.2 (plugin lifecycle baseline, provided by the host); `@deepseek-ai/dsh-tools` ≥0.1.1-rc.2 and `@deepseek-ai/dsh-session` ≥0.1.1-rc.2 are **not imported by `index.mjs`** — the plugin only uses host services such as `ctx.commands` / `ctx.webServer` / `ctx.slots`, taking both its command and HTTP entry points from the context. These two are therefore marked `optional: true` in `package.json`'s `peerDependenciesMeta` (the host always provides them, so no hard version check is needed); their ranges are likewise reference-only.
 - **bsdtar**: Windows 10+ ships `tar.exe` (bsdtar/libarchive); on macOS `tar` is bsdtar. No npm native modules are used. The local bsdtar rejects `..` members itself; the member whitelist runs before it, gives a clearer error, and also covers symlink members and other tar implementations.
 
@@ -189,6 +213,7 @@ The Settings page's **"Config Packer"** tab (module checkboxes / preset switchin
 
 | Version | Date | Type | Highlights |
 | --- | --- | --- | --- |
+| **v0.2.4** | 2026-09-17 | Async / security | File and subprocess work is async end to end (`node:fs/promises` + `execFile`, streaming hashes, bounded concurrency of 16 for hashing and copying, `sha256()` now throws on failure); the public API returns Promises and no longer blocks the event loop; new `/packer/api/*` protections: fail-closed auth (official `connection.requestRejection` only — a missing service, missing method or a throwing call is a hard 403), an explicitly opted-in one-time-token fallback (`authMode: 'token'`, same-origin checks + `webServer.tapIndex` injection), a rate limit (60/min, outermost gate) and a body size limit (8 MB, decided before the body is buffered), plus path redaction in error messages; `apply()` now explicitly wires the handler into `webServer.register({ kind: 'prefix', path: '/packer/api' })`; tests grown to 47 cases (unauthorized 403 / oversized 413 / rate-limited 429 / token path / no-connection default deny / apply wiring) |
 | **v0.2.3** | 2026-09-16 | Security hardening | Target-path containment plus a `rel` whitelist on restore (absolute / drive-letter / UNC / `..` rejected); integrity made fail-closed (missing or malformed fingerprints rejected, `sha256()` now throws instead of returning `''`, streaming hash); archive members whitelisted via `tar -tf` before unpacking, link-type members refused, temp dirs always cleaned in `try/finally`; restore now backs up → temp file → atomic `rename` → abort-and-rollback on failure; `memory` module excludes `*.db*` by default; privacy scan gained Unix/UNC paths, unquoted credentials and bare key shapes, `.env`-style extensionless text, with per-line full counting; unique pack-name suffix; `peerDependenciesMeta` marks host-provided peers optional; the web UI now surfaces server-side error reasons |
 | **v0.2.2** | 2026-09-05 | Adaptation / UI | Adapted for DSH 0.1.2-rc.1; management panel redesigned on the "skeleton / flesh / breath" design language — packing-workflow layout (stage progress bar / equipment panel / diff color bands) + orange-amber-teal brand palette (packing & migration) + dark-mode support (follows DSH theme, dual-channel detection) |
 | **v0.2.1** | 2026-09-05 | UI refactor | Config Packer panel UI rebuilt — neutralSurface background + white cards (max-width 860 centered, radius 16), 4/8px grid spacing, restrained 150ms transitions; colors strictly from dsh-fuse default tokens (`--pk-*` variables, zero hardcoded values); diff report got four-column count badges + semantic color dots (added=green / changed=orange / same+skipped=muted); privacy risks default to a warning tint |
