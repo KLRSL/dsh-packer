@@ -846,7 +846,18 @@ async function applyRestore(manifest, { strategy = 'overwrite', moduleFilter = n
           }
           const backup = await backupTarget(target)
           const sep = `\n<!-- merged from dsh-packer pack ${manifest.createdAt} -->\n`
-          await fsp.appendFile(target, sep + (await readFileText(src)), 'utf-8')
+          // v0.2.6（自审 P1）：README 一直宣称"每个被覆盖/**追加**的目标先写临时文件再 rename 原子替换"，
+          // 但这里其实是直接 appendFile——中途失败会留下半截文件，只能靠备份兜底。
+          // 现在改为：复制到临时文件 → 追加 → rename 原子替换 → 失败清理临时文件。
+          const mergeTmp = `${target}.merge-tmp-${process.pid}`
+          await fsp.copyFile(target, mergeTmp)
+          try {
+            await fsp.appendFile(mergeTmp, sep + (await readFileText(src)), 'utf-8')
+            await fsp.rename(mergeTmp, target)
+          } catch (err) {
+            try { await fsp.rm(mergeTmp, { force: true }) } catch { /* 忽略 */ }
+            throw err
+          }
           applied.push({ target, backup, kind: 'merge' })
           stats.merged++
           continue
