@@ -1,3 +1,5 @@
+
+
 # dsh-packer
 
 > **Agent 配置打包器**：把本地 DSH 资产按模块打包成标准 zip——迁移、分享、恢复，隐私扫描全程护航。
@@ -136,11 +138,12 @@ dsh plugin --profile web add link:./dsh-packer
 `<DSH_BIOMEMORY_DIR || ~/.dsh/biomemory>/biomemory.db`。运行中的 WAL 库不能安全复制，所以它**不在包内**。
 要完整迁移记忆：先**停止 DSH**，再复制该目录下的 `biomemory.db`（如有 `-wal`/`-shm` 一并复制），到目标机同路径放好。
 只搬包不搬库＝目标机只有镜像，没有记忆本体。
+
 - 打包文件名带唯一后缀（`dsh-packer-<时间戳>-<随机>-<模式>.zip`），同一秒内多次打包不互相覆盖。
 - 打包使用系统 **bsdtar**（libarchive）生成标准 zip，**零原生 npm 依赖**。
 - 文件与子进程操作全部异步（`node:fs/promises` + `execFile`），哈希与复制走有界并发（默认 16 路），大批量打包不会卡住 DSH 的事件循环。
 
-### 设置页 Web API（`/packer/api/*`）的鉴权与限额
+## 设置页 Web API（`/packer/api/*`）的鉴权与限额
 
 设置页与 `/pack` 命令等价，走插件自己注册的前缀路由 `/packer/api/*`。这条路由的默认姿态是 **fail-closed**——判定顺序为「速率限制 → 鉴权 → 体积 → 路由」，前三步都在**读取请求体之前**完成：
 
@@ -187,7 +190,7 @@ dsh plugin --profile web add link:./dsh-packer
 /pack create [--modules skills,memory] [--mode migrate|share] [--note 备注] [--dry-run]
 /pack create --share                            # --share 是 --mode share 的简写
 /pack restore <zip路径> [--strategy overwrite|skip|merge]
-/pack scan                                      # 对所有可打包模块做隐私扫描
+/ack scan                                       # 对所有可打包模块做隐私扫描
 ```
 
 | 命令 | 参数 | 说明 |
