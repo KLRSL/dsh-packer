@@ -794,7 +794,7 @@ test('Web API：未知接口 404；错误文案不泄露服务端绝对路径', 
 })
 
 test('redactPaths：抹掉盘符 / UNC / Unix 用户目录路径，普通文案不动', () => {
-  assert.equal(I.redactPaths('文件不存在: <local>\\projects\\x\\y.zip'), '文件不存在: <路径已隐去>')
+  assert.equal(I.redactPaths('文件不存在: D:\\work\\repo\\x\\y.zip'), '文件不存在: <路径已隐去>')
   assert.equal(I.redactPaths('读不到 /home/alice/.dsh/settings.yaml'), '读不到 <路径已隐去>')
   assert.equal(I.redactPaths('UNC \\\\server\\share\\a.txt 不可读'), 'UNC <路径已隐去> 不可读')
   assert.equal(I.redactPaths('未知模块: skills（未选择任何模块）'), '未知模块: skills（未选择任何模块）')
