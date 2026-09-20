@@ -460,6 +460,14 @@ async function createPack({ modules, mode = 'migrate', note = '', dryRun = false
       findings.slice(0, 10).map((f) => `- ${formatFinding(f)}`).join('\n'))
   }
 
+  // v0.2.6（自审 P10）：读不出内容的文件没被扫描（未写指纹，privacyScan 也看不到），
+  // 但此前仍会被打进包——分享模式下等于把未扫描内容发给别人。分享模式直接失败（fail-closed）；
+  // 迁移模式保留行为，但 UI/命令都会如实上报 unreadable。
+  if (share && unreadable.length) {
+    throw new Error(`分享模式拒绝打包：${unreadable.length} 个文件读不出内容、未经过隐私扫描（fail-closed）：\n` +
+      unreadable.slice(0, 10).map((f) => `- ${f.module}/${f.rel}：${f.error}`).join('\n'))
+  }
+
   const totalBytes = (await mapLimit(collected, IO_CONCURRENCY, (f) => fileSize(f.abs)))
     .reduce((s, n) => s + n, 0)
 
