@@ -92,7 +92,7 @@ When it finishes, the zip is written to `~/.dsh/packs/` (override with `DSH_PACK
 | `profiles` | Profile configs (excluding `node_modules`), under `~/.dsh/profiles` | ✅ | ❌ |
 | `settings` | Global settings (`settings.yaml`) | ✅ | ❌ |
 | `presets` | Agent presets (`.agent-presets`) | ✅ | ❌ |
-| `memory` | Memory data (`DSH_MEMORY_ROOT` or `~/.dsh/memory`, excluding `backups/` and live SQLite databases `*.db*`) | ✅ | ❌ |
+| `memory` | **Memory mirror** (the human-readable Markdown copy under `DSH_MEMORY_ROOT` or `~/.dsh/memory`, excluding `backups/`). ⚠️ The runtime source of truth is the SQLite database (`DSH_BIOMEMORY_DIR` or `~/.dsh/biomemory/biomemory.db`), which is **not** in the pack — see "How memory migrates" below | ✅ | ❌ |
 
 **The two built-in presets**:
 
@@ -128,6 +128,13 @@ Other security measures:
 - Restore containment is **two-sided**: the source must stay inside the extraction directory and the target must stay inside its module root (zip-slip / tampered manifests with `../` escapes are rejected). Absolute paths, drive-letter paths, UNC paths and `..` segments are rejected by a whitelist before restore even starts.
 - Before unpacking, archive members are listed with `tar -tf` and whitelisted (absolute / drive-letter / UNC / `..` names rejected), and symlink / hardlink / device members are refused; the extracted tree is scanned again for symlinks. Temporary extraction directories are always cleaned up in `try/finally` — on success and on failure.
 - Targets are backed up first (`<packs>/.restore-backups/<timestamp>/`), written to a temp file and swapped in with an atomic `rename`; any failure aborts and rolls back what this run already replaced or added.
+### How memory migrates (read this)
+
+The `memory` module in a pack only carries the **human-readable Markdown mirror**; the real source of truth is the SQLite database
+`<DSH_BIOMEMORY_DIR || ~/.dsh/biomemory>/biomemory.db`. A live WAL database cannot be copied safely, so it is **never in the pack**.
+To migrate memory completely: **stop DSH first**, then copy `biomemory.db` (plus any `-wal` / `-shm` sidecars) to the same path on the target machine.
+Moving the pack alone gives the target only the mirror, not the memory itself.
+
 - Live SQLite databases (`*.db`, `*.db-wal`, `*.db-shm`, `*.sqlite`) are neither packed nor restored by default — DSH / the memory plugin holds them, and overwriting can corrupt them.
 - Pack file names carry a unique suffix (`dsh-packer-<timestamp>-<random>-<mode>.zip`) so packs created within the same second never overwrite each other.
 - Packs are built with the system **bsdtar** (libarchive) — standard zips with **zero native npm dependencies**.

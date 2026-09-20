@@ -101,7 +101,11 @@ const MODULES = {
     share: false,
   },
   memory: {
-    label: '记忆数据（DSH_MEMORY_ROOT 或 ~/.dsh/memory 等）',
+    // v0.2.5 语义澄清（自审 P6）：本模块打包的是**记忆的 Markdown 只读镜像**，
+    // 而记忆的运行时事实源是 SQLite 库（默认 <DSH_BIOMEMORY_DIR || ~/.dsh/biomemory>/biomemory.db），
+    // 它被 skipFiles 排除、且不在本模块扫描范围内——因为运行中的 WAL 库复制出来可能是坏的。
+    // 所以「打包了记忆」只意味着带走了可读副本；要迁移真库请在停止 DSH 后手动复制那个 .db。
+    label: '记忆镜像（Markdown 只读副本；运行时 SQLite 真库不在包内）',
     kind: 'dir',
     resolve: () => MEMORY_ROOT,
     default: true,

@@ -92,7 +92,7 @@ dsh plugin --profile web add link:./dsh-packer
 | `profiles` | Profile 配置（不含 `node_modules`），位于 `~/.dsh/profiles` | ✅ | ❌ |
 | `settings` | 全局设置（`settings.yaml`） | ✅ | ❌ |
 | `presets` | Agent 预设（`.agent-presets`） | ✅ | ❌ |
-| `memory` | 记忆数据（`DSH_MEMORY_ROOT` 或 `~/.dsh/memory`，不含 `backups/` 与运行中的 SQLite 库 `*.db*`） | ✅ | ❌ |
+| `memory` | **记忆镜像**（Markdown 只读副本，位于 `DSH_MEMORY_ROOT` 或 `~/.dsh/memory`；不含 `backups/`）。⚠️ 记忆的运行时事实源是 SQLite 库（`DSH_BIOMEMORY_DIR` 或 `~/.dsh/biomemory/biomemory.db`），**默认不在包内**——见下方「记忆怎么迁移」 | ✅ | ❌ |
 
 **双模式预设**：
 
@@ -129,6 +129,13 @@ dsh plugin --profile web add link:./dsh-packer
 - 解包前先用 `tar -tf` 列成员做白名单校验（拒绝绝对路径 / 盘符 / UNC / `..`），并拒绝符号链接、硬链接等非普通文件类型；解压后再扫一遍解压结果，出现符号链接即拒绝。临时解压目录统一在 `try/finally` 中清理（成功、失败都不残留）。
 - 恢复前先备份目标（`<packs>/.restore-backups/<时间戳>/`），写临时文件后 `rename` 原子替换；任一环节失败即中止并回滚本次已替换/已新增的文件。
 - 运行中的 SQLite 库（`*.db`、`*.db-wal`、`*.db-shm`、`*.sqlite`）默认既不打包也不恢复——被 DSH / 记忆插件持有，覆写可能损坏数据。
+
+### 记忆怎么迁移（重要）
+
+包里的 `memory` 模块只是**人类可读的 Markdown 镜像**；记忆的真正事实源是 SQLite 库：
+`<DSH_BIOMEMORY_DIR || ~/.dsh/biomemory>/biomemory.db`。运行中的 WAL 库不能安全复制，所以它**不在包内**。
+要完整迁移记忆：先**停止 DSH**，再复制该目录下的 `biomemory.db`（如有 `-wal`/`-shm` 一并复制），到目标机同路径放好。
+只搬包不搬库＝目标机只有镜像，没有记忆本体。
 - 打包文件名带唯一后缀（`dsh-packer-<时间戳>-<随机>-<模式>.zip`），同一秒内多次打包不互相覆盖。
 - 打包使用系统 **bsdtar**（libarchive）生成标准 zip，**零原生 npm 依赖**。
 - 文件与子进程操作全部异步（`node:fs/promises` + `execFile`），哈希与复制走有界并发（默认 16 路），大批量打包不会卡住 DSH 的事件循环。
