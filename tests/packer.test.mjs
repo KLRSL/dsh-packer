@@ -901,3 +901,26 @@ test('apply(ctx)：handler 真的挂到 webServer（kind=prefix / path=/packer/a
   mod.apply(c.ctx, {})
   assert.equal(c.registrations.length, 0)
 })
+
+
+// ---------- UI 与 host 的模块清单一致性（防回归） ----------
+// 背景：v0.2.6 新增 memoryDb 后，客户端仍硬编码 6 个模块名，导致「记忆真库」在设置页
+// 根本勾不到（host 有 7 个、UI 只显示 6 个）。下面两条守卫防止同类问题再次发生。
+test('一致性：客户端不再硬编码模块清单（模块集必须由 host 的 /status 驱动）', () => {
+  const client = fs.readFileSync(path.join(import.meta.dirname, '..', 'lib', 'client.js'), 'utf-8')
+  assert.equal(/MODULE_ORDER\s*=\s*\[/.test(client), false,
+    'lib/client.js 不应再出现硬编码的 MODULE_ORDER 数组')
+  assert.ok(client.includes('moduleOrder('), 'lib/client.js 应通过 moduleOrder(...) 从 status.modules 推导模块顺序')
+})
+
+test('一致性：host 的每个模块都能在客户端被渲染（无遗漏）', () => {
+  const src = fs.readFileSync(path.join(import.meta.dirname, '..', 'index.mjs'), 'utf-8')
+  const block = src.slice(src.indexOf('const MODULES = {'), src.indexOf('\n}', src.indexOf('const MODULES = {')))
+  const hostModules = [...block.matchAll(/^\s{2}([A-Za-z][\w]*):\s*\{/gm)].map((m) => m[1])
+  assert.ok(hostModules.length >= 7, `host 模块数异常：${hostModules.length}`)
+  const client = fs.readFileSync(path.join(import.meta.dirname, '..', 'lib', 'client.js'), 'utf-8')
+  const preferred = /MODULE_PREFERRED\s*=\s*\[([^\]]*)\]/.exec(client)?.[1] || ''
+  const listed = [...preferred.matchAll(/"([^"]+)"/g)].map((m) => m[1])
+  const missing = hostModules.filter((m) => !listed.includes(m))
+  assert.deepEqual(missing, [], `这些 host 模块未在客户端首选序中登记：${missing.join(', ')}`)
+})

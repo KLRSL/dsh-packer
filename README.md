@@ -4,7 +4,7 @@
 >
 > [简体中文](README.md) · [English](README.en.md)
 
-> **v0.2.6** · MIT License · DSH ≥ 0.1.1-rc.2（预发布版本号不受 semver 范围约束；已适配 **0.2.0-rc.2（桌面版）**）· Node ≥ 22.19.0
+> **v0.2.7** · MIT License · DSH ≥ 0.1.1-rc.2（预发布版本号不受 semver 范围约束；已适配 **0.2.0-rc.2（桌面版）**）· Node ≥ 22.19.0
 
 dsh-packer 是 [DeepSeek Harness](https://github.com/deepseek-ai/dsh)（DSH）的「Agent 配置打包器」插件：把本地 Agent 资产按模块打包成标准 zip，用于两种场景：
 
@@ -229,6 +229,7 @@ dsh plugin --profile web add link:./dsh-packer
 
 | 版本 | 日期 | 类型 | 要点 |
 | --- | --- | --- | --- |
+| **v0.2.7** | 2026-09-29 | **修 UI 漏模块**：设置页的模块清单此前是硬编码 6 项，导致 v0.2.6 新增的 `memoryDb`（记忆真库）**在界面上根本勾不到**——现改为完全由 host 的 `/status` 驱动（`moduleOrder(status.modules)`），默认勾选也遍历全部模块；新增两条一致性守卫测试（客户端不得再硬编码模块清单、host 的每个模块必须能在客户端渲染）。测试 50/50。 |
 | **v0.2.6** | 2026-09-29 | 功能 / 适配 | **记忆真库进包（一致快照）+ 适配 DSH 0.2.0-rc.2**（取代 v0.2.5「真库不在包内」的限制）：①新增 `memoryDb` 模块——把记忆的运行时事实源（`<DSH_BIOMEMORY_DIR || ~/.dsh/biomemory>/biomemory.db`）用 `VACUUM INTO` 取一致快照后入包（只读连接，不复制运行中的 WAL 库；实测 2.78MB 源库 → 2.57MB 可读快照，条目与审计行完整）；快照失败则该文件不进包并计入 `unreadable`，绝不静默降级；快照落在系统临时目录，打包结束（含失败与 `--dry-run`）统一清理。②`dsh.client.inject` 删除 0.2.0 中不存在的 `@deepseek-ai/dsh-client-runtime`。测试 48/48 全绿 |
 | **v0.2.5** | 2026-09-20 | 语义澄清 | **包里的「记忆」只是镜像**：memory 模块打包 `~/.dsh/memory` 的 Markdown 只读副本，而记忆的运行时事实源是 SQLite（`~/.dsh/biomemory/biomemory.db`）——被 `skipFiles` 排除且不在扫描范围（运行中的 WAL 库复制出来可能是坏的）。模块标签改为「记忆镜像（…；运行时 SQLite 真库不在包内）」，中英 README 增「记忆怎么迁移（重要）」：**先停 DSH，再手动复制 biomemory.db（含 -wal/-shm）**，"只搬包不搬库＝目标机只有镜像"。另：客户端 bundle 迁入 `lib/client.js`。47 测试全绿 |
 | **v0.2.4** | 2026-09-17 | 异步化 / 安全加固 | 文件与子进程操作全链路异步（`node:fs/promises` + `execFile`，哈希改流式、复制与哈希走有界并发 16 路，`sha256()` 失败即抛错），对外 API 一律返回 Promise、不再阻塞事件循环；新增 `/packer/api/*` 防护：鉴权默认 fail-closed（只用官方 `connection.requestRejection`，服务缺失/接口缺失/调用抛错一律 403）、显式 opt-in 的一次性令牌回退（`authMode: 'token'`，同源校验 + `webServer.tapIndex` 注入）、速率限制（60 次/分钟，最外层）与请求体上限（8 MB，在完整缓冲请求体之前判定）、错误文案路径脱敏；`apply()` 明确接线到 `webServer.register({ kind: 'prefix', path: '/packer/api' })`；测试补齐 47 例（含未授权 403 / 超限 413 / 限流 429 / 令牌路径 / 无 connection 默认拒绝 / apply 接线） |

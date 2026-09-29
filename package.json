@@ -1,7 +1,7 @@
 {
   "name": "dsh-packer",
-  "description": "dsh-packer v0.2.6：把本地 DSH 资产（Skills / 会话 / Profile / 设置 / 记忆）按模块打包成 zip，支持迁移、分享、恢复与隐私扫描。",
-  "version": "0.2.6",
+  "description": "dsh-packer v0.2.7：把本地 DSH 资产（Skills / 会话 / Profile / 设置 / 记忆）按模块打包成 zip，支持迁移、分享、恢复与隐私扫描。",
+  "version": "0.2.7",
   "type": "module",
   "main": "./index.mjs",
   "exports": {
