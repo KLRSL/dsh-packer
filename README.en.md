@@ -4,7 +4,7 @@
 >
 > [简体中文](README.md) · [English](README.en.md)
 
-> **v0.2.5** · MIT License · DSH ≥ 0.1.1-rc.2 (prerelease versions are not bounded by semver ranges; tested on 0.1.5-rc.1) · Node ≥ 22.19.0
+> **v0.2.6** · MIT License · DSH ≥ 0.1.1-rc.2 (prerelease versions are not bounded by semver ranges; adapted for **0.2.0-rc.2 (Desktop)**) · Node ≥ 22.19.0
 
 **dsh-packer** is the Agent Configuration Packer plugin for **DeepSeek Harness (DSH)**: it packs your local Agent assets, module by module, into standard zip archives, for two purposes:
 
@@ -17,7 +17,7 @@ Every module is optional (Skills / Sessions / Profiles / Settings / Presets / Me
 
 | Feature | Description |
 | --- | --- |
-| Modular packing | Six modules, any combination: `skills` / `sessions` / `profiles` / `settings` / `presets` / `memory` (`memory` excludes live SQLite databases `*.db*` by default) |
+| Modular packing | Seven modules, any combination: `skills` / `sessions` / `profiles` / `settings` / `presets` / `memory` (Markdown mirror) / `memoryDb` (**consistent SQLite snapshot of the memory truth source**, on by default) |
 | Two built-in presets | **Migrate** (everything) / **Share** (Skills only; sessions, memory data and personal skill subdirectories are automatically excluded) |
 | Privacy & security scan | Detects drive-letter / Unix / UNC paths, user-directory paths, credential assignments and bare key shapes (`sk-`, `ghp_`, `AKIA`, JWT, …), plus personal nicknames, counting **every occurrence**; **share mode hard-blocks on any hit, migrate mode reports only** |
 | File-level operation preview | Full file list preview before packing; diff report before restore (added / changed / same / skipped) |
@@ -92,7 +92,8 @@ When it finishes, the zip is written to `~/.dsh/packs/` (override with `DSH_PACK
 | `profiles` | Profile configs (excluding `node_modules`), under `~/.dsh/profiles` | ✅ | ❌ |
 | `settings` | Global settings (`settings.yaml`) | ✅ | ❌ |
 | `presets` | Agent presets (`.agent-presets`) | ✅ | ❌ |
-| `memory` | **Memory mirror** (the human-readable Markdown copy under `DSH_MEMORY_ROOT` or `~/.dsh/memory`, excluding `backups/`). ⚠️ The runtime source of truth is the SQLite database (`DSH_BIOMEMORY_DIR` or `~/.dsh/biomemory/biomemory.db`), which is **not** in the pack — see "How memory migrates" below | ✅ | ❌ |
+| `memory` | **Memory mirror** (human-readable Markdown under `DSH_MEMORY_ROOT` or `~/.dsh/memory`, excluding `backups/`) | ✅ | ❌ |
+| `memoryDb` | **Memory truth source** (`<DSH_BIOMEMORY_DIR \|\| ~/.dsh/biomemory>/biomemory.db`): packed as a **consistent `VACUUM INTO` snapshot** (read-only connection, never touches a live WAL database); on failure the file is left out and reported under `unreadable` | ✅ | ❌ |
 
 **The two built-in presets**:
 
@@ -135,7 +136,7 @@ The `memory` module in a pack only carries the **human-readable Markdown mirror*
 To migrate memory completely: **stop DSH first**, then copy `biomemory.db` (plus any `-wal` / `-shm` sidecars) to the same path on the target machine.
 Moving the pack alone gives the target only the mirror, not the memory itself.
 
-- Live SQLite databases (`*.db`, `*.db-wal`, `*.db-shm`, `*.sqlite`) are neither packed nor restored by default — DSH / the memory plugin holds them, and overwriting can corrupt them.
+- SQLite is handled on both sides: **packing** takes a consistent `VACUUM INTO` snapshot (`memoryDb`, since v0.2.6) instead of copying a live, DSH-held WAL database (failure means the file is skipped and listed under `unreadable`); **restore** still skips `*.db*` by default (`includeDb: true` writes them) so a memory database in use on the target machine is never overwritten.
 - Pack file names carry a unique suffix (`dsh-packer-<timestamp>-<random>-<mode>.zip`) so packs created within the same second never overwrite each other.
 - Packs are built with the system **bsdtar** (libarchive) — standard zips with **zero native npm dependencies**.
 - All file and subprocess work is asynchronous (`node:fs/promises` + `execFile`), with bounded concurrency (16 by default) for hashing and copying, so packing large trees never blocks DSH's event loop.
@@ -220,6 +221,7 @@ The Settings page's **"Config Packer"** tab (module checkboxes / preset switchin
 
 | Version | Date | Type | Highlights |
 | --- | --- | --- | --- |
+| **v0.2.6** | 2026-09-29 | Feature / adaptation | **The memory truth source is now inside the pack (consistent snapshot) + DSH 0.2.0-rc.2 adaptation**, superseding the v0.2.5 limitation: (1) new `memoryDb` module — the runtime source of truth (`<DSH_BIOMEMORY_DIR || ~/.dsh/biomemory>/biomemory.db`) is packed as a `VACUUM INTO` snapshot taken over a read-only connection (never a copy of a live WAL database; measured 2.78MB → 2.57MB, entries and audit rows intact); a failed snapshot leaves the file out and reports it under `unreadable` rather than silently degrading; snapshots live in a temp directory and are always cleaned up (success, failure and `--dry-run` alike); (2) dropped `@deepseek-ai/dsh-client-runtime` from `dsh.client.inject` — that package does not exist in 0.2.0. 48/48 tests pass |
 | **v0.2.5** | 2026-09-20 | Semantics | **The "memory" in a pack is only the mirror**: the `memory` module packs the read-only Markdown copy under `~/.dsh/memory`, while the runtime source of truth is SQLite (`~/.dsh/biomemory/biomemory.db`) — excluded by `skipFiles` and never scanned (a live WAL database cannot be copied safely). The module label now reads "memory mirror (…; the live SQLite database is not in the pack)" and both READMEs gained a **How memory migrates** section: **stop DSH first**, then copy `biomemory.db` (plus `-wal`/`-shm`) by hand — the pack alone gives the target only the mirror. Also: client bundle moved to `lib/client.js`. 47 tests green |
 | **v0.2.4** | 2026-09-17 | Async / security | File and subprocess work is async end to end (`node:fs/promises` + `execFile`, streaming hashes, bounded concurrency of 16 for hashing and copying, `sha256()` now throws on failure); the public API returns Promises and no longer blocks the event loop; new `/packer/api/*` protections: fail-closed auth (official `connection.requestRejection` only — a missing service, missing method or a throwing call is a hard 403), an explicitly opted-in one-time-token fallback (`authMode: 'token'`, same-origin checks + `webServer.tapIndex` injection), a rate limit (60/min, outermost gate) and a body size limit (8 MB, decided before the body is buffered), plus path redaction in error messages; `apply()` now explicitly wires the handler into `webServer.register({ kind: 'prefix', path: '/packer/api' })`; tests grown to 47 cases (unauthorized 403 / oversized 413 / rate-limited 429 / token path / no-connection default deny / apply wiring) |
 | **v0.2.3** | 2026-09-16 | Security hardening | Target-path containment plus a `rel` whitelist on restore (absolute / drive-letter / UNC / `..` rejected); integrity made fail-closed (missing or malformed fingerprints rejected, `sha256()` now throws instead of returning `''`, streaming hash); archive members whitelisted via `tar -tf` before unpacking, link-type members refused, temp dirs always cleaned in `try/finally`; restore now backs up → temp file → atomic `rename` → abort-and-rollback on failure; `memory` module excludes `*.db*` by default; privacy scan gained Unix/UNC paths, unquoted credentials and bare key shapes, `.env`-style extensionless text, with per-line full counting; unique pack-name suffix; `peerDependenciesMeta` marks host-provided peers optional; the web UI now surfaces server-side error reasons |

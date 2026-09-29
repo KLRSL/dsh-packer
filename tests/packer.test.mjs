@@ -95,6 +95,39 @@ test('记忆数据模块收集 hot 内容且跳过 backups', async () => {
   assert.ok(!rels.some((r) => r.startsWith('backups/')))
 })
 
+// v0.2.6：记忆真库（SQLite）现在是独立模块，打包时走 VACUUM INTO 一致快照
+test('memoryDb 模块：打包 SQLite 真库的一致快照，且不落地源库', async () => {
+  const { DatabaseSync } = await import('node:sqlite')
+  const dbPath = I.BIOMEMORY_DB
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true })
+  fs.rmSync(dbPath, { force: true })
+  {
+    const db = new DatabaseSync(dbPath)
+    db.exec('PRAGMA journal_mode = WAL')
+    db.exec('CREATE TABLE entries (id INTEGER PRIMARY KEY, text TEXT)')
+    db.exec('CREATE TABLE audit_log (id INTEGER PRIMARY KEY, ev TEXT)')
+    const ins = db.prepare('INSERT INTO entries (text) VALUES (?)')
+    for (let i = 1; i <= 3; i++) ins.run('条目 ' + i)
+    db.exec("INSERT INTO audit_log (ev) VALUES ('WRITE')")
+    db.close()
+  }
+  assert.equal(I.MODULES.memoryDb.resolve(), dbPath, 'memoryDb 应解析到 DSH_BIOMEMORY_DIR 下的 biomemory.db')
+
+  const files = await I.collectModuleFiles(I.MODULES.memoryDb)
+  assert.equal(files.length, 1, '快照成功应产出一个文件')
+  assert.equal(files[0].rel, 'biomemory.db')
+  assert.notEqual(path.resolve(files[0].abs), path.resolve(dbPath), '打包用的必须是快照副本，不是源库')
+
+  const snap = new DatabaseSync(files[0].abs, { readOnly: true })
+  assert.equal(snap.prepare('SELECT COUNT(*) c FROM entries').get().c, 3, '快照应含全部条目')
+  assert.equal(snap.prepare('SELECT COUNT(*) c FROM audit_log').get().c, 1, '快照应含审计行')
+  snap.close()
+
+  await I.cleanupSnapshots()
+  assert.ok(!fs.existsSync(files[0].abs), 'cleanupSnapshots 后快照临时目录应被清理')
+  fs.rmSync(dbPath, { force: true })
+})
+
 test('隐私扫描：检测本地路径/用户名/密钥', async () => {
   const files = []
   for (const k of ['skills', 'settings']) {

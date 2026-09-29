@@ -4,7 +4,7 @@
 >
 > [简体中文](README.md) · [English](README.en.md)
 
-> **v0.2.5** · MIT License · DSH ≥ 0.1.1-rc.2（预发布版本号不受 semver 范围约束，已实测 0.1.5-rc.1）· Node ≥ 22.19.0
+> **v0.2.6** · MIT License · DSH ≥ 0.1.1-rc.2（预发布版本号不受 semver 范围约束；已适配 **0.2.0-rc.2（桌面版）**）· Node ≥ 22.19.0
 
 dsh-packer 是 [DeepSeek Harness](https://github.com/deepseek-ai/dsh)（DSH）的「Agent 配置打包器」插件：把本地 Agent 资产按模块打包成标准 zip，用于两种场景：
 
@@ -17,7 +17,7 @@ dsh-packer 是 [DeepSeek Harness](https://github.com/deepseek-ai/dsh)（DSH）�
 
 | 特性 | 说明 |
 | --- | --- |
-| 模块化打包 | 六个模块任意组合：`skills` / `sessions` / `profiles` / `settings` / `presets` / `memory`（`memory` 默认排除运行中的 SQLite 库 `*.db*`） |
+| 模块化打包 | 七个模块任意组合：`skills` / `sessions` / `profiles` / `settings` / `presets` / `memory`（Markdown 镜像）/ `memoryDb`（**记忆真库 SQLite 一致快照**，默认带上） |
 | 双模式预设 | **迁移**（全选）/ **分享**（只勾 Skills，自动排除会话、记忆与个人 skill 子目录） |
 | 隐私安全扫描 | 打包前检测盘符 / Unix / UNC 路径、用户目录路径、疑似密钥赋值、密钥形状（`sk-`、`ghp_`、`AKIA`、JWT 等）、个人昵称；逐行**全量计数**；**分享命中即拦截，迁移仅报告** |
 | 文件级操作预览 | 打包前预览完整文件清单；恢复前差异报告（新增 / 变更 / 相同 / 跳过） |
@@ -92,7 +92,8 @@ dsh plugin --profile web add link:./dsh-packer
 | `profiles` | Profile 配置（不含 `node_modules`），位于 `~/.dsh/profiles` | ✅ | ❌ |
 | `settings` | 全局设置（`settings.yaml`） | ✅ | ❌ |
 | `presets` | Agent 预设（`.agent-presets`） | ✅ | ❌ |
-| `memory` | **记忆镜像**（Markdown 只读副本，位于 `DSH_MEMORY_ROOT` 或 `~/.dsh/memory`；不含 `backups/`）。⚠️ 记忆的运行时事实源是 SQLite 库（`DSH_BIOMEMORY_DIR` 或 `~/.dsh/biomemory/biomemory.db`），**默认不在包内**——见下方「记忆怎么迁移」 | ✅ | ❌ |
+| `memory` | **记忆镜像**（Markdown 只读副本，位于 `DSH_MEMORY_ROOT` 或 `~/.dsh/memory`；不含 `backups/`） | ✅ | ❌ |
+| `memoryDb` | **记忆真库**（`<DSH_BIOMEMORY_DIR \|\| ~/.dsh/biomemory>/biomemory.db`）：打包时用 `VACUUM INTO` 取**一致快照**（只读连接、不碰运行中的 WAL），快照失败则该文件不进包并计入 `unreadable` | ✅ | ❌ |
 
 **双模式预设**：
 
@@ -128,14 +129,22 @@ dsh plugin --profile web add link:./dsh-packer
 - 恢复对**源路径与目标路径双向**做 containment 校验：源必须在解压目录内，目标必须落在模块目标根内（zip-slip / 篡改清单的 `../` 越界一律拒绝）；绝对路径、盘符路径、UNC 路径、`..` 片段在恢复前就被白名单拒绝。
 - 解包前先用 `tar -tf` 列成员做白名单校验（拒绝绝对路径 / 盘符 / UNC / `..`），并拒绝符号链接、硬链接等非普通文件类型；解压后再扫一遍解压结果，出现符号链接即拒绝。临时解压目录统一在 `try/finally` 中清理（成功、失败都不残留）。
 - 恢复前先备份目标（`<packs>/.restore-backups/<时间戳>/`），写临时文件后 `rename` 原子替换；任一环节失败即中止并回滚本次已替换/已新增的文件。
-- 运行中的 SQLite 库（`*.db`、`*.db-wal`、`*.db-shm`、`*.sqlite`）默认既不打包也不恢复——被 DSH / 记忆插件持有，覆写可能损坏数据。
+- SQLite 库的处理分两侧：**打包**走 `VACUUM INTO` 一致快照（`memoryDb` 模块，v0.2.6 起）——不直接复制被 DSH 持有的 WAL 库，取不到就跳过并计入 `unreadable`；**恢复**默认仍跳过 `*.db*`（`includeDb: true` 才写入），避免覆盖目标机上正在使用的记忆库。
 
-### 记忆怎么迁移（重要）
+### 记忆怎么迁移
 
-包里的 `memory` 模块只是**人类可读的 Markdown 镜像**；记忆的真正事实源是 SQLite 库：
-`<DSH_BIOMEMORY_DIR || ~/.dsh/biomemory>/biomemory.db`。运行中的 WAL 库不能安全复制，所以它**不在包内**。
-要完整迁移记忆：先**停止 DSH**，再复制该目录下的 `biomemory.db`（如有 `-wal`/`-shm` 一并复制），到目标机同路径放好。
-只搬包不搬库＝目标机只有镜像，没有记忆本体。
+**v0.2.6 起，记忆真库默认就在包里。** 记忆有两个模块，职责不同：
+
+| 模块 | 内容 | 迁移够不够 |
+| --- | --- | --- |
+| `memoryDb` | `<DSH_BIOMEMORY_DIR || ~/.dsh/biomemory>/biomemory.db` 的 **`VACUUM INTO` 一致快照**（含条目与审计） | ✅ 记忆本体 |
+| `memory` | `DSH_MEMORY_ROOT` 下的 Markdown 只读镜像，供人查看 | ⚠️ 只是可读副本 |
+
+快照用**只读连接**打开源库，产出的是 SQLite 自己保证一致的文件，因此**不必先停 DSH**。
+取不到快照（库被独占、磁盘满等）时该文件不进包，并如实出现在 `unreadable` 列表里——绝不退化成“直接复制运行中的库”。
+
+**恢复**时 `memoryDb` 默认**不写入**（避免覆盖目标机正在使用的记忆库）：需要时用 `includeDb: true`（命令行 `/pack restore --include-db`，接口参数同名字段）。
+只搬镜像不搬真库＝目标机没有记忆本体。
 - 打包文件名带唯一后缀（`dsh-packer-<时间戳>-<随机>-<模式>.zip`），同一秒内多次打包不互相覆盖。
 - 打包使用系统 **bsdtar**（libarchive）生成标准 zip，**零原生 npm 依赖**。
 - 文件与子进程操作全部异步（`node:fs/promises` + `execFile`），哈希与复制走有界并发（默认 16 路），大批量打包不会卡住 DSH 的事件循环。
@@ -220,6 +229,7 @@ dsh plugin --profile web add link:./dsh-packer
 
 | 版本 | 日期 | 类型 | 要点 |
 | --- | --- | --- | --- |
+| **v0.2.6** | 2026-09-29 | 功能 / 适配 | **记忆真库进包（一致快照）+ 适配 DSH 0.2.0-rc.2**（取代 v0.2.5「真库不在包内」的限制）：①新增 `memoryDb` 模块——把记忆的运行时事实源（`<DSH_BIOMEMORY_DIR || ~/.dsh/biomemory>/biomemory.db`）用 `VACUUM INTO` 取一致快照后入包（只读连接，不复制运行中的 WAL 库；实测 2.78MB 源库 → 2.57MB 可读快照，条目与审计行完整）；快照失败则该文件不进包并计入 `unreadable`，绝不静默降级；快照落在系统临时目录，打包结束（含失败与 `--dry-run`）统一清理。②`dsh.client.inject` 删除 0.2.0 中不存在的 `@deepseek-ai/dsh-client-runtime`。测试 48/48 全绿 |
 | **v0.2.5** | 2026-09-20 | 语义澄清 | **包里的「记忆」只是镜像**：memory 模块打包 `~/.dsh/memory` 的 Markdown 只读副本，而记忆的运行时事实源是 SQLite（`~/.dsh/biomemory/biomemory.db`）——被 `skipFiles` 排除且不在扫描范围（运行中的 WAL 库复制出来可能是坏的）。模块标签改为「记忆镜像（…；运行时 SQLite 真库不在包内）」，中英 README 增「记忆怎么迁移（重要）」：**先停 DSH，再手动复制 biomemory.db（含 -wal/-shm）**，"只搬包不搬库＝目标机只有镜像"。另：客户端 bundle 迁入 `lib/client.js`。47 测试全绿 |
 | **v0.2.4** | 2026-09-17 | 异步化 / 安全加固 | 文件与子进程操作全链路异步（`node:fs/promises` + `execFile`，哈希改流式、复制与哈希走有界并发 16 路，`sha256()` 失败即抛错），对外 API 一律返回 Promise、不再阻塞事件循环；新增 `/packer/api/*` 防护：鉴权默认 fail-closed（只用官方 `connection.requestRejection`，服务缺失/接口缺失/调用抛错一律 403）、显式 opt-in 的一次性令牌回退（`authMode: 'token'`，同源校验 + `webServer.tapIndex` 注入）、速率限制（60 次/分钟，最外层）与请求体上限（8 MB，在完整缓冲请求体之前判定）、错误文案路径脱敏；`apply()` 明确接线到 `webServer.register({ kind: 'prefix', path: '/packer/api' })`；测试补齐 47 例（含未授权 403 / 超限 413 / 限流 429 / 令牌路径 / 无 connection 默认拒绝 / apply 接线） |
 | **v0.2.3** | 2026-09-16 | 安全加固 | 恢复侧目标路径 containment + rel 白名单（拒绝绝对/盘符/UNC/`..`）；完整性 fail-closed（缺指纹或格式非法一律拒绝，`sha256()` 异常改为抛出、改流式哈希）；解包前 `tar -tf` 成员白名单 + 拒绝链接类成员 + 临时目录统一 `try/finally` 清理；恢复改为「备份 → 临时文件 → rename 原子替换 → 失败中止回滚」；`memory` 模块默认排除 `*.db*`；隐私扫描补齐 Unix/UNC 路径、无引号密钥与裸密钥形状、`.env` 等无扩展名文本，命中数按行全量计数；打包文件名加唯一后缀；`peerDependenciesMeta` 标记宿主内建 peer 为 optional；前端错误提示改为展示服务端原因 |

@@ -54,6 +54,50 @@ const NEVER_PACK = ['.credentials.yaml', '.anonymous-user-id']
 // 运行中的 SQLite 数据库（含 WAL/SHM/journal）：默认不打包、不恢复（见 memory 模块 skipFiles）
 const DB_FILE_RE = /(^|\.)db(-wal|-shm|-journal)?$|\.sqlite3?$/i
 
+// ---------- 记忆真库（SQLite）快照 ----------
+// 默认 <DSH_BIOMEMORY_DIR || ~/.dsh/biomemory>/biomemory.db —— 与 dsh-biomemory 的 db.mjs 同一解析口径。
+// 运行中的库带 WAL，直接复制可能得到半写状态；VACUUM INTO 产出一致副本（实测只读连接亦可，
+// 2.78MB 源 → 2.57MB 快照，条目与审计行均可读）。失败绝不静默降级为"直接复制"。
+const BIOMEMORY_DIR = process.env.DSH_BIOMEMORY_DIR || path.join(DSH_HOME, 'biomemory')
+const BIOMEMORY_DB = path.join(BIOMEMORY_DIR, 'biomemory.db')
+
+/** 本次进程内已生成的快照：src -> { path, dir } | null（null = 已失败，不再重试） */
+const SNAPSHOT_CACHE = new Map()
+/** 快照失败原因（createPack 会把它们并入 unreadable 如实上报） */
+const SNAPSHOT_WARNINGS = []
+
+/** 取 SQLite 一致快照；失败返回 null 并记录原因（不抛错，不复制运行中的库） */
+async function snapshotSqlite(src) {
+  if (SNAPSHOT_CACHE.has(src)) return SNAPSHOT_CACHE.get(src)
+  try {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-pack-snap-'))
+    const out = path.join(dir, path.basename(src))
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(src, { readOnly: true })
+    try {
+      db.exec(`VACUUM INTO '${out.replace(/'/g, "''")}'`)
+    } finally {
+      db.close()
+    }
+    const rec = { path: out, dir }
+    SNAPSHOT_CACHE.set(src, rec)
+    return rec
+  } catch (err) {
+    SNAPSHOT_WARNINGS.push({ src, error: String(err?.message || err) })
+    SNAPSHOT_CACHE.set(src, null)
+    return null
+  }
+}
+
+/** 清理本次打包产生的快照目录（createPack 收尾调用；失败不影响结果） */
+async function cleanupSnapshots() {
+  for (const rec of SNAPSHOT_CACHE.values()) {
+    if (!rec) continue
+    try { await fsp.rm(rec.dir, { recursive: true, force: true }) } catch { /* 忽略 */ }
+  }
+  SNAPSHOT_CACHE.clear()
+}
+
 // 异步 IO 的有界并发：既不串行等 I/O，也不为大批量文件同时打开上千个句柄
 const IO_CONCURRENCY = 16
 const HASH_CHUNK_BYTES = 1024 * 1024
@@ -113,6 +157,18 @@ const MODULES = {
     skipDirs: ['backups'],
     // 运行中的 SQLite 库被 DSH / 记忆插件持有，复制或覆盖都可能损坏，默认排除
     skipFiles: DB_FILE_RE,
+  },
+  memoryDb: {
+    // v0.2.6：记忆的**运行时事实源**（SQLite 真库）单独成模块并支持安全快照。
+    // 此前它被完全排除、只字不提，等于「打包了记忆」却不含真库——迁移过去是空壳。
+    // 现在：存在即用 VACUUM INTO 取一致副本（只读连接，不碰运行中的 WAL）；
+    // 取不到就跳过并如实上报，绝不复制一个可能半写的库。
+    label: '记忆真库（SQLite 一致快照：VACUUM INTO，含条目与审计；不含 -wal/-shm）',
+    kind: 'file',
+    resolve: () => BIOMEMORY_DB,
+    default: true,   // 迁移预设：记忆数据不可丢，默认带上
+    share: false,    // 分享包绝不带真库
+    snapshot: true,
   },
 }
 
@@ -261,9 +317,15 @@ async function collectModuleFiles(mod, excludeSharePersonal = false) {
   const root = mod.resolve()
   const files = []
   if (mod.kind === 'file') {
-    if ((await exists(root)) && !NEVER_PACK.includes(path.basename(root))) {
-      files.push({ rel: path.basename(root), abs: root })
+    if (!(await exists(root)) || NEVER_PACK.includes(path.basename(root))) return files
+    // v0.2.6：声明 snapshot 的模块走一致快照（如运行中的 SQLite 库）
+    if (mod.snapshot) {
+      const snap = await snapshotSqlite(root)
+      if (!snap) return files // 快照失败 → 不打包该文件（原因由 SNAPSHOT_WARNINGS 上报）
+      files.push({ rel: path.basename(root), abs: snap.path })
+      return files
     }
+    files.push({ rel: path.basename(root), abs: root })
     return files
   }
   if (!(await exists(root))) return files
@@ -427,7 +489,7 @@ function buildManifest({ modules, mode, note, files }) {
   }
 }
 
-async function createPack({ modules, mode = 'migrate', note = '', dryRun = false }) {
+async function createPackInner({ modules, mode = 'migrate', note = '', dryRun = false }) {
   if (!Array.isArray(modules) || !modules.length) throw new Error('未选择任何模块')
   for (const m of modules) {
     if (!MODULES[m]) throw new Error(`未知模块: ${m}`)
@@ -449,6 +511,10 @@ async function createPack({ modules, mode = 'migrate', note = '', dryRun = false
       }
     })
     for (const f of hashed) if (f) collected.push(f)
+  }
+  // v0.2.6：SQLite 快照失败的文件不打包，但必须如实出现在 unreadable 里（不静默）
+  for (const w of SNAPSHOT_WARNINGS) {
+    unreadable.push({ module: 'memoryDb', rel: path.basename(w.src), error: `SQLite 快照失败（VACUUM INTO）：${w.error}` })
   }
   if (!collected.length) throw new Error('所选模块没有可打包的文件')
 
@@ -510,6 +576,19 @@ async function createPack({ modules, mode = 'migrate', note = '', dryRun = false
     return { ok: true, pack: summary, privacy: findings, unreadable }
   } finally {
     await fsp.rm(stage, { recursive: true, force: true })
+  }
+}
+
+/**
+ * 打包入口。包一层只为两件事：①每次运行清空快照告警；②无论成功、失败还是预览，
+ * 都清理 VACUUM INTO 落在系统临时目录里的快照（进程不退出也不该留垃圾）。
+ */
+async function createPack(opts) {
+  SNAPSHOT_WARNINGS.length = 0
+  try {
+    return await createPackInner(opts)
+  } finally {
+    await cleanupSnapshots()
   }
 }
 
@@ -1417,6 +1496,10 @@ export const __internals = {
   DSH_HOME,
   PACKS_DIR,
   MEMORY_ROOT,
+  BIOMEMORY_DIR,
+  BIOMEMORY_DB,
+  snapshotSqlite,
+  cleanupSnapshots,
   MODULES,
   collectModuleFiles,
   moduleStats,
