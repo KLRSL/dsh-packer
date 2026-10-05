@@ -691,7 +691,9 @@ async function validateArchiveMembers(zipPath) {
   try {
     listing = await execTar(['-tf', zipPath])
   } catch (err) {
-    throw new Error(`读取包内清单失败: ${String(err.message || err)}`)
+    // 跨平台：Windows 的 bsdtar 能读 zip，Linux 的 GNU tar 读不了真正的 zip —— 两种情况都判为「包非法/已损坏」，
+    // 保持 fail-closed，且错误文案必须能让人（和测试）认出这是「非法包」而不是普通读取错误。
+    throw new Error(`包内清单非法或包已损坏（无法读取成员列表）: ${String(err.message || err)}`)
   }
   const members = String(listing).split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
   if (!members.length) throw new Error('包内没有任何成员（空包或不是有效 zip）')
@@ -708,7 +710,7 @@ async function validateArchiveMembers(zipPath) {
   try {
     verbose = await execTar(['-tvf', zipPath])
   } catch (err) {
-    throw new Error(`读取包内成员类型失败: ${String(err.message || err)}`)
+    throw new Error(`包内成员类型非法或包已损坏（无法读取类型列表）: ${String(err.message || err)}`)
   }
   for (const line of String(verbose).split(/\r?\n/)) {
     if (!line) continue
