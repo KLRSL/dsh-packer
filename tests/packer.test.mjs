@@ -924,3 +924,28 @@ test('一致性：host 的每个模块都能在客户端被渲染（无遗漏）
   const missing = hostModules.filter((m) => !listed.includes(m))
   assert.deepEqual(missing, [], `这些 host 模块未在客户端首选序中登记：${missing.join(', ')}`)
 })
+
+// ============================================================================
+// v0.3.0：归档层改纯 JS zip —— 往返回归（deflate / stored / UTF-8 名）
+// ============================================================================
+test('归档：纯 JS zip 往返（deflate + stored + UTF-8 名），且不依赖外部命令', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'packer-zip-'))
+  const zipPath = path.join(dir, 'round-trip.zip')
+  const big = 'x'.repeat(8192)                 // 压缩后明显变小 → deflate
+  const tiny = 'hi'                             // 太小 → stored
+  const utf8Name = '记忆-测试.md'
+  fs.writeFileSync(zipPath, I.buildZip([
+    { name: 'a/big.txt', data: Buffer.from(big, 'utf-8') },
+    { name: 'tiny.txt', data: Buffer.from(tiny, 'utf-8') },
+    { name: utf8Name, data: Buffer.from('中文内容', 'utf-8') },
+  ]))
+  const names = await I.validateArchiveMembers(zipPath)
+  assert.ok(names.includes('a/big.txt'), JSON.stringify(names))
+  assert.ok(names.includes(utf8Name), JSON.stringify(names))
+  const out = await I.extractZip(zipPath)
+  assert.equal(fs.readFileSync(path.join(out, 'a', 'big.txt'), 'utf-8'), big)
+  assert.equal(fs.readFileSync(path.join(out, 'tiny.txt'), 'utf-8'), tiny)
+  assert.equal(fs.readFileSync(path.join(out, utf8Name), 'utf-8'), '中文内容')
+  fs.rmSync(dir, { recursive: true, force: true })
+  fs.rmSync(out, { recursive: true, force: true })
+})

@@ -4,7 +4,7 @@
 >
 > [简体中文](README.md) · [English](README.en.md)
 
-> **v0.2.7** · MIT License · DSH ≥ 0.1.1-rc.2（预发布版本号不受 semver 范围约束；已适配 **0.2.0-rc.2（桌面版）**）· Node ≥ 22.19.0
+> **v0.3.0** · MIT License · DSH ≥ 0.1.1-rc.2（预发布版本号不受 semver 范围约束；已适配 **0.2.0-rc.2（桌面版）**）· Node ≥ 22.19.0
 
 dsh-packer 是 [DeepSeek Harness](https://github.com/deepseek-ai/dsh)（DSH）的「Agent 配置打包器」插件：把本地 Agent 资产按模块打包成标准 zip，用于两种场景：
 
@@ -27,7 +27,7 @@ dsh-packer 是 [DeepSeek Harness](https://github.com/deepseek-ai/dsh)（DSH）�
 | 包管理与备注 | 包列表（时间 / 大小 / 模块 / 备注）、删除、重命名、打包时填写备注 |
 | 分享包自动附 README | 自动生成并附带说明包内容的 `README.md` |
 | 深色模式适配 | 打包工作流面板跟随 DSH 主题（`--dsw-alias-*` 变量，双通道探测） |
-| 零原生依赖 | 系统 bsdtar（libarchive）生成标准 zip，任何解压工具可打开 |
+| 零原生依赖 | **纯 JS 读写标准 zip**（zip.mjs + node:zlib），不调用 tar/unzip 等外部命令，任何解压工具可打开 |
 
 ## 安装
 
@@ -127,7 +127,7 @@ dsh plugin --profile web add link:./dsh-packer
 
 - 每个文件的 **SHA-256** 指纹写入 `manifest.json`，恢复时用于完整性校验（fail-closed）；清单条目**缺指纹或指纹格式非法一律拒绝**，不写入指纹的文件在打包时被跳过并如实上报（绝不写空指纹）。
 - 恢复对**源路径与目标路径双向**做 containment 校验：源必须在解压目录内，目标必须落在模块目标根内（zip-slip / 篡改清单的 `../` 越界一律拒绝）；绝对路径、盘符路径、UNC 路径、`..` 片段在恢复前就被白名单拒绝。
-- 解包前先用 `tar -tf` 列成员做白名单校验（拒绝绝对路径 / 盘符 / UNC / `..`），并拒绝符号链接、硬链接等非普通文件类型；解压后再扫一遍解压结果，出现符号链接即拒绝。临时解压目录统一在 `try/finally` 中清理（成功、失败都不残留）。
+- 解包前先解析 zip 中央目录做白名单校验（拒绝绝对路径 / 盘符 / UNC / `..`），并拒绝符号链接、硬链接等非普通文件类型；解压后再扫一遍解压结果，出现符号链接即拒绝。临时解压目录统一在 `try/finally` 中清理（成功、失败都不残留）。
 - 恢复前先备份目标（`<packs>/.restore-backups/<时间戳>/`），写临时文件后 `rename` 原子替换；任一环节失败即中止并回滚本次已替换/已新增的文件。
 - SQLite 库的处理分两侧：**打包**走 `VACUUM INTO` 一致快照（`memoryDb` 模块，v0.2.6 起）——不直接复制被 DSH 持有的 WAL 库，取不到就跳过并计入 `unreadable`；**恢复**默认仍跳过 `*.db*`（`includeDb: true` 才写入），避免覆盖目标机上正在使用的记忆库。
 
@@ -146,7 +146,7 @@ dsh plugin --profile web add link:./dsh-packer
 **恢复**时 `memoryDb` 默认**不写入**（避免覆盖目标机正在使用的记忆库）：需要时用 `includeDb: true`（命令行 `/pack restore --include-db`，接口参数同名字段）。
 只搬镜像不搬真库＝目标机没有记忆本体。
 - 打包文件名带唯一后缀（`dsh-packer-<时间戳>-<随机>-<模式>.zip`），同一秒内多次打包不互相覆盖。
-- 打包使用系统 **bsdtar**（libarchive）生成标准 zip，**零原生 npm 依赖**。
+- 打包使用**纯 JS zip 实现**（zip.mjs + node:zlib）生成标准 zip，**零原生 npm 依赖**。
 - 文件与子进程操作全部异步（`node:fs/promises` + `execFile`），哈希与复制走有界并发（默认 16 路），大批量打包不会卡住 DSH 的事件循环。
 
 ### 设置页 Web API（`/packer/api/*`）的鉴权与限额
@@ -223,13 +223,13 @@ dsh plugin --profile web add link:./dsh-packer
 - **Node.js** ≥ 22.19.0
 - **DSH 依赖** `@deepseek-ai/dsh-*` ≥ 0.1.1-rc.2（v0.2.4 已实测 0.1.5-rc.1）。**注意：预发布版本号不受 semver 范围约束**——`>=0.1.1-rc.2` 按 node-semver 规则并不满足 `0.1.5-rc.1`（实测 `satisfies=false`），该范围仅作参考记录，不承担版本闸门作用。
 - **peer 依赖**：`@deepseek-ai/cordis` ^4.0.2（插件生命周期基准，由宿主提供）；`@deepseek-ai/dsh-tools` ≥0.1.1-rc.2 与 `@deepseek-ai/dsh-session` ≥0.1.1-rc.2 **未被 `index.mjs` 直接 import**——本插件只使用 `ctx.commands` / `ctx.webServer` / `ctx.slots` 等宿主内建服务，命令与 HTTP 入口都从 context 取，故这两项已在 `package.json` 的 `peerDependenciesMeta` 中标记为 `optional: true`（宿主必定提供，安装时不再强制校验），范围同为参考记录。
-- **bsdtar**：Windows 10+ 自带 `tar.exe`（bsdtar/libarchive）；macOS 的 `tar` 即 bsdtar。不依赖任何 npm 原生模块。实测本机 bsdtar 会拒绝 `..` 成员；解包白名单校验在其之前先做，错误信息更明确，且对符号链接成员/其他 tar 实现同样生效。
+- **无需外部命令**：包由 zip.mjs（node:zlib）直接读写，创建 / 列成员 / 解包都不调用 tar、bsdtar、unzip；任何标准解压工具都能打开生成的包。
 
 ## 版本历史
 
 | 版本 | 日期 | 类型 | 要点 |
 | --- | --- | --- | --- |
-| **v0.2.7** | 2026-09-29 | **修 UI 漏模块**：设置页的模块清单此前是硬编码 6 项，导致 v0.2.6 新增的 `memoryDb`（记忆真库）**在界面上根本勾不到**——现改为完全由 host 的 `/status` 驱动（`moduleOrder(status.modules)`），默认勾选也遍历全部模块；新增两条一致性守卫测试（客户端不得再硬编码模块清单、host 的每个模块必须能在客户端渲染）。测试 50/50。 |
+| **v0.3.0** | 2026-09-29 | **修 UI 漏模块**：设置页的模块清单此前是硬编码 6 项，导致 v0.2.6 新增的 `memoryDb`（记忆真库）**在界面上根本勾不到**——现改为完全由 host 的 `/status` 驱动（`moduleOrder(status.modules)`），默认勾选也遍历全部模块；新增两条一致性守卫测试（客户端不得再硬编码模块清单、host 的每个模块必须能在客户端渲染）。测试 50/50。 |
 | **v0.2.6** | 2026-09-29 | 功能 / 适配 | **记忆真库进包（一致快照）+ 适配 DSH 0.2.0-rc.2**（取代 v0.2.5「真库不在包内」的限制）：①新增 `memoryDb` 模块——把记忆的运行时事实源（`<DSH_BIOMEMORY_DIR || ~/.dsh/biomemory>/biomemory.db`）用 `VACUUM INTO` 取一致快照后入包（只读连接，不复制运行中的 WAL 库；实测 2.78MB 源库 → 2.57MB 可读快照，条目与审计行完整）；快照失败则该文件不进包并计入 `unreadable`，绝不静默降级；快照落在系统临时目录，打包结束（含失败与 `--dry-run`）统一清理。②`dsh.client.inject` 删除 0.2.0 中不存在的 `@deepseek-ai/dsh-client-runtime`。测试 48/48 全绿 |
 | **v0.2.5** | 2026-09-20 | 语义澄清 | **包里的「记忆」只是镜像**：memory 模块打包 `~/.dsh/memory` 的 Markdown 只读副本，而记忆的运行时事实源是 SQLite（`~/.dsh/biomemory/biomemory.db`）——被 `skipFiles` 排除且不在扫描范围（运行中的 WAL 库复制出来可能是坏的）。模块标签改为「记忆镜像（…；运行时 SQLite 真库不在包内）」，中英 README 增「记忆怎么迁移（重要）」：**先停 DSH，再手动复制 biomemory.db（含 -wal/-shm）**，"只搬包不搬库＝目标机只有镜像"。另：客户端 bundle 迁入 `lib/client.js`。47 测试全绿 |
 | **v0.2.4** | 2026-09-17 | 异步化 / 安全加固 | 文件与子进程操作全链路异步（`node:fs/promises` + `execFile`，哈希改流式、复制与哈希走有界并发 16 路，`sha256()` 失败即抛错），对外 API 一律返回 Promise、不再阻塞事件循环；新增 `/packer/api/*` 防护：鉴权默认 fail-closed（只用官方 `connection.requestRejection`，服务缺失/接口缺失/调用抛错一律 403）、显式 opt-in 的一次性令牌回退（`authMode: 'token'`，同源校验 + `webServer.tapIndex` 注入）、速率限制（60 次/分钟，最外层）与请求体上限（8 MB，在完整缓冲请求体之前判定）、错误文案路径脱敏；`apply()` 明确接线到 `webServer.register({ kind: 'prefix', path: '/packer/api' })`；测试补齐 47 例（含未授权 403 / 超限 413 / 限流 429 / 令牌路径 / 无 connection 默认拒绝 / apply 接线） |
@@ -244,7 +244,7 @@ dsh plugin --profile web add link:./dsh-packer
 
 **生成的 zip 打不开 / 提示损坏？**
 
-包由系统 bsdtar 生成的标准 zip，Windows 资源管理器与常见解压工具均可打开。若校验失败，请勿手工解压改动包内容（会破坏 `manifest.json` 里的 SHA-256 指纹），直接用 `/pack create` 重新生成。可用 `/pack list` 查看 `~/.dsh/packs`（或 `DSH_PACKS_DIR` 指向的目录）里有哪些包。
+包是纯 JS 生成的标准 zip，Windows 资源管理器与常见解压工具均可打开。若校验失败，请勿手工解压改动包内容（会破坏 `manifest.json` 里的 SHA-256 指纹），直接用 `/pack create` 重新生成。可用 `/pack list` 查看 `~/.dsh/packs`（或 `DSH_PACKS_DIR` 指向的目录）里有哪些包。
 
 **恢复时 manifest 校验失败？**
 

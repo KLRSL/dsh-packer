@@ -15,7 +15,7 @@ Please do **not** open public issues for security vulnerabilities.
 
 dsh-packer is a **local-first** configuration packer:
 
-- Packing is performed by the system `bsdtar` (libarchive); **zero npm native dependencies**.
+- Packing and unpacking use a **pure-JS ZIP implementation** (zip.mjs, node:zlib); **zero npm native dependencies, no external commands**.
 - **Never packed**: `.credentials.yaml`, `.anonymous-user-id` — any sensitive module is always skipped.
 - **Privacy scan before packing**: local absolute paths, user-directory paths, suspected credentials/tokens, personal nicknames. **Share mode blocks on any hit** (returns an error, no pack is generated); migrate mode reports only.
 - **Restore safety**: `manifest.json` SHA-256 fingerprints are verified per source file (**fail-closed**: mismatch rejects, no partial copy); zip-slip / `../` path traversal in pack manifests is rejected.

@@ -30,7 +30,8 @@
 //   - connection 由 dsh-client-connection 提供：requestRejection(req) 是官方给
 //     「另一条 Web 路由」复用的 Host/Origin 信任 + 浏览器会话鉴权入口（401/403/undefined）
 //   - 命令 handler(invocation) -> { kind: 'success'|'error', text }，允许返回 Promise
-//   - zip 打包用系统 bsdtar（tar -a -cf，libarchive 支持 zip；零原生依赖）
+//   - zip 读写为**纯 JS 实现**（zip.mjs，node:zlib；不调用 tar/unzip/zip 等外部命令）——
+//     此前依赖系统 tar 导致 Windows/Linux 产出的包互不兼容（GNU tar 读不了真 zip）
 // ============================================================================
 
 import fsp from 'node:fs/promises'
@@ -39,6 +40,7 @@ import os from 'node:os'
 import crypto from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { buildZip, readZipFile, entryKind, readEntryData } from './zip.mjs'
 
 export const inject = []
 
@@ -101,8 +103,6 @@ async function cleanupSnapshots() {
 // 异步 IO 的有界并发：既不串行等 I/O，也不为大批量文件同时打开上千个句柄
 const IO_CONCURRENCY = 16
 const HASH_CHUNK_BYTES = 1024 * 1024
-// tar 列表输出（-tvf）可能很大，给足缓冲；这不是分配，只是上限
-const TAR_MAX_BUFFER = 64 * 1024 * 1024
 
 // ---------- 模块定义（逻辑名 → 本地路径；恢复时按当前机器映射） ----------
 
@@ -452,23 +452,19 @@ async function privacyScan(files) {
   return findings
 }
 
-// ---------- zip 打包（系统 bsdtar，零原生依赖） ----------
+// ---------- 归档（纯 JS zip） ----------
 
-/**
- * 异步执行 tar：参数以数组传入，绝不拼接 shell 字符串（Windows 上 tar 即系统自带
- * bsdtar，execFile 直接解析 PATH/PATHEXT，不需要 shell）。
- */
-async function execTar(args) {
-  try {
-    const { stdout } = await execFileAsync('tar', args, {
-      encoding: 'utf-8',
-      maxBuffer: TAR_MAX_BUFFER,
-      windowsHide: true,
-    })
-    return stdout
-  } catch (err) {
-    throw new Error(`tar 执行失败: ${err.stderr || err.message}`)
+/** 递归收集 staging 目录里的文件，返回 { name（'/' 分隔）, data }[] */
+async function collectStageEntries(root, rel = '') {
+  const out = []
+  const entries = await fsp.readdir(path.join(root, rel), { withFileTypes: true })
+  for (const e of entries) {
+    const childRel = rel ? rel + '/' + e.name : e.name
+    if (e.isDirectory()) out.push(...(await collectStageEntries(root, childRel)))
+    else if (e.isFile()) out.push({ name: childRel, data: await fsp.readFile(path.join(root, childRel)) })
+    // 其它类型（符号链接/设备）不进包：staging 是我们自己拷贝出来的，正常不会出现
   }
+  return out
 }
 
 function stagingDir() {
@@ -560,7 +556,8 @@ async function createPackInner({ modules, mode = 'migrate', note = '', dryRun = 
     await fsp.mkdir(PACKS_DIR, { recursive: true })
     const zipName = `dsh-packer-${nowStamp()}-${uniqueSuffix()}-${mode}.zip`
     const zipPath = path.join(PACKS_DIR, zipName)
-    await execTar(['-a', '-cf', zipPath, '-C', stage, '.'])
+    const zipEntries = await collectStageEntries(stage)
+    await fsp.writeFile(zipPath, buildZip(zipEntries))
     // 摘要文件（包管理快速读取）
     const summary = {
       name: zipName,
@@ -682,44 +679,34 @@ async function renamePack(oldName, newName) {
 
 // ---------- 恢复 ----------
 
-/**
- * 解包前白名单校验：成员名不得是绝对路径 / 盘符 / UNC / 含 `..` 片段；
- * 成员类型只放行普通文件（-）与目录（d）——符号链接、硬链接、设备文件一律拒绝。
- */
-async function validateArchiveMembers(zipPath) {
-  let listing
+/** 读中央目录并做白名单校验：成员名不得是绝对路径/盘符/UNC/含 .. ；类型只放行普通文件与目录 */
+async function listSafeEntries(zipPath) {
+  let entries
   try {
-    listing = await execTar(['-tf', zipPath])
+    entries = readZipFile(zipPath).entries
   } catch (err) {
-    // 跨平台：Windows 的 bsdtar 能读 zip，Linux 的 GNU tar 读不了真正的 zip —— 两种情况都判为「包非法/已损坏」，
-    // 保持 fail-closed，且错误文案必须能让人（和测试）认出这是「非法包」而不是普通读取错误。
     throw new Error(`包内清单非法或包已损坏（无法读取成员列表）: ${String(err.message || err)}`)
   }
-  const members = String(listing).split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
-  if (!members.length) throw new Error('包内没有任何成员（空包或不是有效 zip）')
-  for (const raw of members) {
-    const name = raw.replace(/^\.\//, '')
+  if (!entries.length) throw new Error('包内没有任何成员（空包或不是有效 zip）')
+  for (const e of entries) {
+    const name = e.name.replace(/^\.\//, '')
     if (!name) continue
     if (name.includes('\0')) throw new Error('包内成员名含非法字符，已拒绝解包（fail-closed）')
     if (/^[A-Za-z]:/.test(name)) throw new Error(`包内成员名非法（盘符路径）: ${name}`)
     if (name.startsWith('/') || name.startsWith('\\')) throw new Error(`包内成员名非法（绝对路径/UNC）: ${name}`)
     if (name.split(/[\\/]/).includes('..')) throw new Error(`包内成员名越界（含 .. 片段）: ${name}`)
-  }
-  // 类型校验（第二遍列表带类型字符）：链接类成员会把解包指向包外
-  let verbose
-  try {
-    verbose = await execTar(['-tvf', zipPath])
-  } catch (err) {
-    throw new Error(`包内成员类型非法或包已损坏（无法读取类型列表）: ${String(err.message || err)}`)
-  }
-  for (const line of String(verbose).split(/\r?\n/)) {
-    if (!line) continue
-    const type = line[0]
-    if (type !== '-' && type !== 'd') {
-      throw new Error(`包内含不允许的成员类型（${type}），已拒绝解包（fail-closed）: ${line.slice(0, 120)}`)
+    const kind = entryKind(e)
+    if (kind !== 'file' && kind !== 'dir') {
+      throw new Error(`包内含不允许的成员类型（${kind}），已拒绝解包（fail-closed）: ${name}`)
     }
   }
-  return members
+  return entries
+}
+
+/** 成员名列表（对外语义不变：字符串数组） */
+async function validateArchiveMembers(zipPath) {
+  const entries = await listSafeEntries(zipPath)
+  return entries.map((e) => e.name)
 }
 
 /** 解压后再查一层：解压结果中出现符号链接即拒绝（防列表解析被绕过） */
@@ -749,10 +736,18 @@ async function assertNoLinkEntries(dir) {
 
 async function extractZip(zipPath) {
   if (!(await exists(zipPath))) throw new Error(`文件不存在: ${zipPath}`)
-  await validateArchiveMembers(zipPath)
+  const { buf, entries } = readZipFile(zipPath)
+  // 校验与解包复用同一份中央目录：先全量校验，再落盘——任一成员非法则一个字节都不写
+  await listSafeEntries(zipPath)
   const dir = await stagingDir()
   try {
-    await execTar(['-xf', zipPath, '-C', dir])
+    for (const e of entries) {
+      const rel = e.name.replace(/^\.\//, '')
+      if (!rel || entryKind(e) === 'dir') continue
+      const dest = path.join(dir, ...rel.split('/'))
+      await fsp.mkdir(path.dirname(dest), { recursive: true })
+      await fsp.writeFile(dest, readEntryData(buf, e))
+    }
     await assertNoLinkEntries(dir)
   } catch (err) {
     await fsp.rm(dir, { recursive: true, force: true })
@@ -1528,7 +1523,8 @@ export const __internals = {
   assertNoLinkEntries,
   extractZip,
   DB_FILE_RE,
-  execTar,
+  buildZip,
+  readZipFile,
   mapLimit,
   exists,
   createPackApiGuard,

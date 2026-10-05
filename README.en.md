@@ -4,7 +4,7 @@
 >
 > [简体中文](README.md) · [English](README.en.md)
 
-> **v0.2.7** · MIT License · DSH ≥ 0.1.1-rc.2 (prerelease versions are not bounded by semver ranges; adapted for **0.2.0-rc.2 (Desktop)**) · Node ≥ 22.19.0
+> **v0.3.0** · MIT License · DSH ≥ 0.1.1-rc.2 (prerelease versions are not bounded by semver ranges; adapted for **0.2.0-rc.2 (Desktop)**) · Node ≥ 22.19.0
 
 **dsh-packer** is the Agent Configuration Packer plugin for **DeepSeek Harness (DSH)**: it packs your local Agent assets, module by module, into standard zip archives, for two purposes:
 
@@ -27,7 +27,7 @@ Every module is optional (Skills / Sessions / Profiles / Settings / Presets / Me
 | Pack management & notes | Pack list (time / size / modules / note), delete, rename, and a note written at pack time |
 | Share packs ship a README | A generated `README.md` describing the pack contents is attached automatically |
 | Dark-mode ready | The workflow panel follows the DSH theme via `--dsw-alias-*` variables (dual-channel detection) |
-| Zero native dependencies | Standard zips built with the system bsdtar (libarchive); openable by any unzip tool |
+| Zero native dependencies | Standard zips built by a pure-JS ZIP writer (zip.mjs + node:zlib); openable by any unzip tool |
 
 ## Installation
 
@@ -138,7 +138,7 @@ Moving the pack alone gives the target only the mirror, not the memory itself.
 
 - SQLite is handled on both sides: **packing** takes a consistent `VACUUM INTO` snapshot (`memoryDb`, since v0.2.6) instead of copying a live, DSH-held WAL database (failure means the file is skipped and listed under `unreadable`); **restore** still skips `*.db*` by default (`includeDb: true` writes them) so a memory database in use on the target machine is never overwritten.
 - Pack file names carry a unique suffix (`dsh-packer-<timestamp>-<random>-<mode>.zip`) so packs created within the same second never overwrite each other.
-- Packs are built with the system **bsdtar** (libarchive) — standard zips with **zero native npm dependencies**.
+- Packs are built by the plugin own **pure-JS ZIP writer** (zip.mjs, node:zlib) — standard zips with **zero native npm dependencies and no external commands**.
 - All file and subprocess work is asynchronous (`node:fs/promises` + `execFile`), with bounded concurrency (16 by default) for hashing and copying, so packing large trees never blocks DSH's event loop.
 
 ### Settings Web API (`/packer/api/*`): auth & limits
@@ -215,13 +215,13 @@ The Settings page's **"Config Packer"** tab (module checkboxes / preset switchin
 - **Node.js** ≥ 22.19.0
 - **DSH packages** `@deepseek-ai/dsh-*` ≥ 0.1.1-rc.2 (v0.2.4 is tested on 0.1.5-rc.1). **Note: prerelease versions are not bounded by semver ranges** — `>=0.1.1-rc.2` does not satisfy `0.1.5-rc.1` under node-semver rules (measured `satisfies=false`), so that range is a documented reference, not a version gate.
 - **Peer dependencies**: `@deepseek-ai/cordis` ^4.0.2 (plugin lifecycle baseline, provided by the host); `@deepseek-ai/dsh-tools` ≥0.1.1-rc.2 and `@deepseek-ai/dsh-session` ≥0.1.1-rc.2 are **not imported by `index.mjs`** — the plugin only uses host services such as `ctx.commands` / `ctx.webServer` / `ctx.slots`, taking both its command and HTTP entry points from the context. These two are therefore marked `optional: true` in `package.json`'s `peerDependenciesMeta` (the host always provides them, so no hard version check is needed); their ranges are likewise reference-only.
-- **bsdtar**: Windows 10+ ships `tar.exe` (bsdtar/libarchive); on macOS `tar` is bsdtar. No npm native modules are used. The local bsdtar rejects `..` members itself; the member whitelist runs before it, gives a clearer error, and also covers symlink members and other tar implementations.
+- **No external commands**: packs are read and written directly by zip.mjs (node:zlib) — creating, listing and extracting never call tar, bsdtar or unzip, and any standard unzip tool can open the produced packs.
 
 ## Version history
 
 | Version | Date | Type | Highlights |
 | --- | --- | --- | --- |
-| **v0.2.7** | 2026-09-29 | Bug fix | **Missing module in the UI fixed**: the settings page hard-coded a 6-entry module list, so the `memoryDb` module added in v0.2.6 (the SQLite truth-source snapshot) **could not be selected at all**. The list is now driven entirely by the host's `/status` payload (`moduleOrder(status.modules)`), and default selection iterates every module the host reports. Two consistency guards were added to the test suite (the client must not hard-code a module list; every host module must be renderable by the client). 50/50 tests pass. |
+| **v0.3.0** | 2026-09-29 | Bug fix | **Missing module in the UI fixed**: the settings page hard-coded a 6-entry module list, so the `memoryDb` module added in v0.2.6 (the SQLite truth-source snapshot) **could not be selected at all**. The list is now driven entirely by the host's `/status` payload (`moduleOrder(status.modules)`), and default selection iterates every module the host reports. Two consistency guards were added to the test suite (the client must not hard-code a module list; every host module must be renderable by the client). 50/50 tests pass. |
 | **v0.2.6** | 2026-09-29 | Feature / adaptation | **The memory truth source is now inside the pack (consistent snapshot) + DSH 0.2.0-rc.2 adaptation**, superseding the v0.2.5 limitation: (1) new `memoryDb` module — the runtime source of truth (`<DSH_BIOMEMORY_DIR || ~/.dsh/biomemory>/biomemory.db`) is packed as a `VACUUM INTO` snapshot taken over a read-only connection (never a copy of a live WAL database; measured 2.78MB → 2.57MB, entries and audit rows intact); a failed snapshot leaves the file out and reports it under `unreadable` rather than silently degrading; snapshots live in a temp directory and are always cleaned up (success, failure and `--dry-run` alike); (2) dropped `@deepseek-ai/dsh-client-runtime` from `dsh.client.inject` — that package does not exist in 0.2.0. 48/48 tests pass |
 | **v0.2.5** | 2026-09-20 | Semantics | **The "memory" in a pack is only the mirror**: the `memory` module packs the read-only Markdown copy under `~/.dsh/memory`, while the runtime source of truth is SQLite (`~/.dsh/biomemory/biomemory.db`) — excluded by `skipFiles` and never scanned (a live WAL database cannot be copied safely). The module label now reads "memory mirror (…; the live SQLite database is not in the pack)" and both READMEs gained a **How memory migrates** section: **stop DSH first**, then copy `biomemory.db` (plus `-wal`/`-shm`) by hand — the pack alone gives the target only the mirror. Also: client bundle moved to `lib/client.js`. 47 tests green |
 | **v0.2.4** | 2026-09-17 | Async / security | File and subprocess work is async end to end (`node:fs/promises` + `execFile`, streaming hashes, bounded concurrency of 16 for hashing and copying, `sha256()` now throws on failure); the public API returns Promises and no longer blocks the event loop; new `/packer/api/*` protections: fail-closed auth (official `connection.requestRejection` only — a missing service, missing method or a throwing call is a hard 403), an explicitly opted-in one-time-token fallback (`authMode: 'token'`, same-origin checks + `webServer.tapIndex` injection), a rate limit (60/min, outermost gate) and a body size limit (8 MB, decided before the body is buffered), plus path redaction in error messages; `apply()` now explicitly wires the handler into `webServer.register({ kind: 'prefix', path: '/packer/api' })`; tests grown to 47 cases (unauthorized 403 / oversized 413 / rate-limited 429 / token path / no-connection default deny / apply wiring) |
@@ -236,7 +236,7 @@ The Settings page's **"Config Packer"** tab (module checkboxes / preset switchin
 
 **The zip won't open / looks corrupted?**
 
-Packs are standard zips created by the system bsdtar — Windows Explorer and common unzip tools can open them. If a pack fails validation, don't hand-edit its contents (that breaks the SHA-256 fingerprints in `manifest.json`); regenerate it with `/pack create`. Check `~/.dsh/packs` (or your `DSH_PACKS_DIR`) with `/pack list` to see what's there.
+Packs are standard zips created by the plugin pure-JS ZIP writer — Windows Explorer and common unzip tools can open them. If a pack fails validation, don't hand-edit its contents (that breaks the SHA-256 fingerprints in `manifest.json`); regenerate it with `/pack create`. Check `~/.dsh/packs` (or your `DSH_PACKS_DIR`) with `/pack list` to see what's there.
 
 **Manifest validation fails on restore?**
 

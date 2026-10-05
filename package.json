@@ -1,7 +1,7 @@
 {
   "name": "dsh-packer",
-  "description": "dsh-packer v0.2.7：把本地 DSH 资产（Skills / 会话 / Profile / 设置 / 记忆）按模块打包成 zip，支持迁移、分享、恢复与隐私扫描。",
-  "version": "0.2.7",
+  "description": "dsh-packer v0.3.0：把本地 DSH 资产（Skills / 会话 / Profile / 设置 / 记忆）按模块打包成 zip（纯 JS 实现，不调用外部命令），支持迁移、分享、恢复与隐私扫描。",
+  "version": "0.3.0",
   "type": "module",
   "main": "./index.mjs",
   "exports": {
@@ -63,6 +63,7 @@
   ],
   "files": [
     "index.mjs",
+    "zip.mjs",
     "lib",
     "cordis.patch.yml",
     "README.md",
