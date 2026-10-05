@@ -87,7 +87,10 @@ export function buildZip(entries, now = new Date()) {
     ch.writeUInt32LE(body.length, 20)
     ch.writeUInt32LE(data.length, 24)
     ch.writeUInt16LE(nameBuf.length, 28)
-    ch.writeUInt32LE((0o100644 << 16) >>> 0, 38) // 外部属性高 16 位 = Unix 权限（普通文件）；>>>0 避免 32 位符号溢出
+    // 外部属性高 16 位 = Unix 权限；>>>0 避免 32 位符号溢出。
+    // 默认普通文件；可传 unixMode（如 0o120777 = 符号链接）用于构造/校验非普通成员
+    const mode = Number.isInteger(e.unixMode) ? e.unixMode : 0o100644
+    ch.writeUInt32LE((mode << 16) >>> 0, 38)
     ch.writeUInt32LE(offset, 42)
     centralParts.push(ch, nameBuf)
 

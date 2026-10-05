@@ -525,17 +525,15 @@ test('解包：成员名越界（../ 或绝对路径）被白名单拒绝且不�
 })
 
 test('解包：符号链接成员被类型白名单拒绝（防链接逃逸）', async () => {
-  const stage = path.join(tmpRoot, 'link-stage')
-  fs.mkdirSync(stage, { recursive: true })
-  fs.writeFileSync(path.join(stage, 'ok.txt'), 'ok\n')
-  try {
-    fs.symlinkSync('../../outside-secret', path.join(stage, 'escape-link'), 'file')
-  } catch {
-    return // 本机不允许建符号链接（无权限）→ 跳过该断言
-  }
-  const tarPath = path.join(tmpRoot, 'with-link.tar')
-  execFileSync('tar', ['-cf', tarPath, '-C', stage, '.'])
-  await assert.rejects(async () => I.validateArchiveMembers(tarPath), /成员类型|fail-closed/)
+  // v0.3.0：不再用系统 tar 造样本（Linux 的 GNU tar 产的是 tar 容器，纯 JS 解析器按设计读不了）。
+  // 直接用我们自己的写入器构造带符号链接成员的 zip —— 跨平台可复现。
+  const zipPath = path.join(tmpRoot, 'with-link.zip')
+  fs.writeFileSync(zipPath, I.buildZip([
+    { name: 'ok.txt', data: Buffer.from('ok\n', 'utf-8') },
+    { name: 'escape-link', data: Buffer.from('../../outside-secret', 'utf-8'), unixMode: 0o120777 },
+  ]))
+  await assert.rejects(async () => I.validateArchiveMembers(zipPath), /成员类型|fail-closed|符号链接/)
+  await assert.rejects(async () => I.extractZip(zipPath), /成员类型|fail-closed|符号链接/)
 })
 
 test('解包：解压结果出现符号链接即拒绝（第二层检查）', async () => {
