@@ -55,7 +55,7 @@ const NEVER_PACK = ['.credentials.yaml', '.anonymous-user-id']
 const DB_FILE_RE = /(^|\.)db(-wal|-shm|-journal)?$|\.sqlite3?$/i
 
 // ---------- 记忆真库（SQLite）快照 ----------
-// 默认 <DSH_BIOMEMORY_DIR || ~/.dsh/biomemory>/biomemory.db —— 与 dsh-biomemory 的 db.mjs 同一解析口径。
+// 默认 <DSH_BIOMEMORY_DIR || ~/.dsh/biomemory>/biomemory.db —— 与 dsh-memory-layer 的 db.mjs 同一解析口径。
 // 运行中的库带 WAL，直接复制可能得到半写状态；VACUUM INTO 产出一致副本（实测只读连接亦可，
 // 2.78MB 源 → 2.57MB 快照，条目与审计行均可读）。失败绝不静默降级为"直接复制"。
 const BIOMEMORY_DIR = process.env.DSH_BIOMEMORY_DIR || path.join(DSH_HOME, 'biomemory')
