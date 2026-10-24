@@ -143,5 +143,5 @@
 
 - `node --test tests/*.test.mjs` 全绿（旧 51 + 新增）。
 - 新增强制用例：/scan 带 abs（用一个含 `C:\` 路径的临时文件断言命中）、share_scope 400、bad_strategy 400、/status 不产生临时快照、加密包往返、回收站恢复、作业进度与取消。
-- `E:\DE\tools\plugin-release-check.cjs` 通过；版本四处一致（package.json / description / lock / README 横幅+历史表）。
+- `<本地工具目录>/plugin-release-check.cjs` 通过；版本四处一致（package.json / description / lock / README 横幅+历史表）。
 - npm pack → 安装 tgz → 重启后设置页可用（人工确认项）。
