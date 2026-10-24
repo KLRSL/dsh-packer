@@ -4,7 +4,7 @@
 >
 > [简体中文](README.md) · [English](README.en.md)
 
-> **v0.6.1** · MIT License · DSH 0.2.x (`>=0.2.0-rc.2 <0.3.0-0`, tested on the 0.2.1-rc.2 desktop app) · Node ≥ 22.19.0
+> **v0.6.2** · MIT License · DSH 0.2.x (`>=0.2.0-rc.2 <0.3.0-0`, tested on the 0.2.1-rc.3 desktop app) · Node ≥ 22.19.0
 
 **dsh-packer** is the Agent Configuration Packer plugin for **DeepSeek Harness (DSH)**: it packs your local Agent assets, module by module, into standard zip archives, for two purposes:
 
@@ -233,7 +233,7 @@ The Settings page is one page in five blocks, following the packer's task chain:
 ## Compatibility
 
 - **Node.js** ≥ 22.19.0
-- **DSH version gate**: `engines.dsh` = `>=0.2.0-rc.2 <0.3.0-0` (tested on the 0.2.1-rc.2 desktop app). DSH evaluates compatibility with `includePrerelease`, so prerelease identifiers participate in range checks; DSH versions outside this range are refused by the plugin manager before install.
+- **DSH version gate**: `engines.dsh` = `>=0.2.0-rc.2 <0.3.0-0` (tested on the 0.2.1-rc.3 desktop app). DSH evaluates compatibility with `includePrerelease`, so prerelease identifiers participate in range checks; DSH versions outside this range are refused by the plugin manager before install.
 - **Peer dependencies**: `@deepseek-ai/cordis` ^4.0.2 (plugin lifecycle baseline, provided by the host); `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-session` share the `>=0.2.0-rc.2 <0.3.0-0` range and are **not imported by `index.mjs`** — the plugin only uses host services such as `ctx.commands` / `ctx.webServer` / `ctx.slots`, so both are marked `optional: true` in `peerDependenciesMeta`.
 - **No external commands**: packs are read and written directly by zip.mjs (node:zlib) — creating, listing and extracting never call tar, bsdtar or unzip, and any standard unzip tool can open the produced packs.
 
@@ -241,6 +241,7 @@ The Settings page is one page in five blocks, following the packer's task chain:
 
 | Version | Date | Type | Highlights |
 | --- | --- | --- | --- |
+| **v0.6.2** | 2026-10-25 | Rewrote the intro line; tested desktop version is now 0.2.1-rc.3. No functional change |
 | **v0.6.1** | 2026-10-25 | **Plugin card copy rewritten** | Localized title ("Config Packer") and one-line summary via `locale/en.json` / `locale/zh.json` `meta`; `description` no longer embeds the version or lists features. No functional changes. |
 | **v0.6.0** | 2026-10-25 | **Settings page rebuilt around the packer's job** | The UI is no longer a form of module cards and buttons; it is one page following the task chain, in five blocks: **existing packs** (name / time / contents / size / encryption, with restore · pack info · delete — delete goes to the Windows Recycle Bin) → **contents to pack** (plain-language list: skills / installed plugins / memory database / sessions / config & presets, with sizes and a total) → **pack options** (as-is / sanitize before packing / encrypt, with passphrase, scan verdict, progress and cancel) → **restore** (pick a pack or a path → per-item diff: in pack vs on this machine vs how to handle → module selection + memory-db toggle → strategy) → **result details** (overwritten / added / skipped / needs confirmation / failed + backup directory + one-click rollback). Naming now follows the plugin itself (no more box/seal/unseal metaphors); Chinese-only copy, **no emoji or icon characters**, statuses expressed in words. `lib/client.js` 1048 → 1421 lines. Backend adds two fields: `modules` and `sha256` per pack in `GET /packs`, and `pack.sha256` in the create result. Tests 80/80. |
 | **v0.5.1** | 2026-10-25 | **Privacy actually handled + plugins travel with migrations** | (1) Privacy goes from "report only" to "must handle": the pack page offers **Sanitize before packing** (rewrites only the copy inside the pack — paths become `<本机路径>` / `<用户目录>` / `<UNC路径>` / `<Unix路径>`, credentials become `<已移除的密钥>`; source files are never touched; forced in share mode) and **Pack as-is** (faithful; warns when credentials are included without a passphrase). (2) Five safety gates for sanitizing: single left-to-right pass, structural characters excluded, any hit containing `{ } [ ] , ; " '` is skipped with a warning, JSON/JSONL is re-parsed with line-shape checks (whole file reverted on failure), non-UTF-8 files are never sanitized, and size/sha256 are recomputed after rewriting (otherwise restore would reject the pack as tampered). (3) New `plugins` module packs the **installed plugin bodies** (`profiles/*/node_modules` top-level packages, scoped `@scope/*` handled, pnpm links followed, cycles guarded) — on by default for migration, never for sharing. (4) Restore back-fills sanitized packs (`<用户目录>` → target home, `<用户名>` → current user) and reports retained placeholders in `stats.warnings`. (5) `/scan` findings carry a `kind` (7 values). Tests 80/80. |
