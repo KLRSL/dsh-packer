@@ -1,0 +1,4 @@
+# dsh-packer bundle patch: mount the agent-config packer.
+- insert:
+    - id: dsh-packer
+      name: dsh-packer

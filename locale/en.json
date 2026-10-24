@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Config Packer",
+    "description": "Packs Skills, sessions, installed plugins and settings into one zip and restores them on a new machine; sanitize or encrypt sensitive content."
+  }
+}

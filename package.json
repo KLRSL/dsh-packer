@@ -1,0 +1,76 @@
+{
+  "name": "dsh-packer",
+  "description": "Packs Skills, sessions, installed plugins and settings into one zip and restores them on a new machine; sanitize or encrypt sensitive content.",
+  "version": "0.6.1",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.2 <0.3.0-0",
+    "@deepseek-ai/dsh-session": ">=0.2.0-rc.2 <0.3.0-0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22.19.0",
+    "dsh": ">=0.2.0-rc.2 <0.3.0-0"
+  },
+  "scripts": {
+    "test": "node --test \"tests/*.test.mjs\""
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KLRSL/dsh-packer.git"
+  },
+  "homepage": "https://github.com/KLRSL/dsh-packer#readme",
+  "bugs": {
+    "url": "https://github.com/KLRSL/dsh-packer/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "packer",
+    "config",
+    "backup",
+    "zip",
+    "migration",
+    "privacy"
+  ],
+  "files": [
+    "index.mjs",
+    "zip.mjs",
+    "crypto.mjs",
+    "lib",
+    "cordis.patch.yml",
+    "locale",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ]
+}
