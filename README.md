@@ -242,6 +242,7 @@ dsh plugin --profile desktop add link:./dsh-packer
 ## 兼容性
 
 - **Node.js** ≥ 22.19.0
+- **多平台通用**：Windows / macOS / Linux / 鸿蒙 共用同一套代码与包格式；两处受限项（回收站、系统文件选择框）与原因见 [docs/platform-support.md](docs/platform-support.md)。
 - **DSH 版本闸门**：`engines.dsh` = `>=0.2.0-rc.2 <0.3.0-0`（0.2.1-rc.3 桌面版实测）。DSH 的兼容性检查带 `includePrerelease`，预发布号参与范围比较；超出该范围的 DSH 会在安装前被插件管理器拒绝。
 - **peer 依赖**：`@deepseek-ai/cordis` ^4.0.2（插件生命周期基准，由宿主提供）；`@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-session` 范围同 `>=0.2.0-rc.2 <0.3.0-0`，且**未被 `index.mjs` 直接 import**——本插件只使用 `ctx.commands` / `ctx.webServer` / `ctx.slots` 等宿主内建服务，故这两项在 `peerDependenciesMeta` 中标记为 `optional: true`。
 - **无需外部命令**：包由 zip.mjs（node:zlib）直接读写，创建 / 列成员 / 解包都不调用 tar、bsdtar、unzip；任何标准解压工具都能打开生成的包。
