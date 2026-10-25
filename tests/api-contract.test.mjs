@@ -35,6 +35,10 @@ const fakePacks = process.env.DSH_PACKS_DIR
 const fakeMemory = process.env.DSH_MEMORY_ROOT
 const settingsPath = path.join(fakeHome, 'settings.yaml')
 const ORIGINAL_SETTINGS = 'agent-default-model:\n  provider: deepseek-official\n'
+// v0.6.5：会话附件对象库 fixture —— 内容寻址，对象名就是 sha256，目录取前两位
+const ATTACH_HASH = '7b18612ba9dcf2983256870cfb100ea39f9cd616be300f1e8af8ab4ce903cb95'
+const ATTACH_REL = `attachments/v1/objects/${ATTACH_HASH.slice(0, 2)}/${ATTACH_HASH}`
+const ATTACH_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff])
 
 let I = null
 let mod = null
@@ -70,6 +74,12 @@ function makeAssets() {
   fs.writeFileSync(path.join(fakeHome, '.agent-presets', 'p1', 'preset.yml'), 'enabled: true\n')
   fs.mkdirSync(path.join(fakeMemory, 'hot'), { recursive: true })
   fs.writeFileSync(path.join(fakeMemory, 'hot', 'knowledge.md'), '- [知识] v0.4.0 测试记忆\n')
+  // 会话图片/附件对象库（v0.6.5）：v1/objects 是字节本体，v1/tmp 是写入暂存（不进包）
+  const attachDir = path.join(fakeHome, 'attachments', 'v1', 'objects', ATTACH_HASH.slice(0, 2))
+  fs.mkdirSync(attachDir, { recursive: true })
+  fs.writeFileSync(path.join(attachDir, ATTACH_HASH), ATTACH_BYTES)
+  fs.mkdirSync(path.join(fakeHome, 'attachments', 'v1', 'tmp'), { recursive: true })
+  fs.writeFileSync(path.join(fakeHome, 'attachments', 'v1', 'tmp', 'in-flight.png'), 'partial-write\n')
 }
 
 function makeMemoryDb() {
@@ -268,7 +278,7 @@ test('/create：mode 白名单 fail-closed（缺失/非法 → 400 bad_mode）',
 })
 
 test('/create：分享模式服务端拦截敏感模块（400 share_scope，P0）', async () => {
-  for (const m of ['sessions', 'profiles', 'settings', 'presets', 'memory', 'memoryDb']) {
+  for (const m of ['sessions', 'attachments', 'profiles', 'settings', 'presets', 'memory', 'memoryDb']) {
     const r = await request('/create', { method: 'POST', body: { modules: [m], mode: 'share' } })
     assert.equal(r.status, 400, `模块 ${m} 必须被服务端拦住`)
     assert.equal(r.data.code, 'share_scope')
@@ -942,5 +952,53 @@ test('§1 命中无法安全替换时：跳过该处、保住原文并记 warnin
   } finally {
     I.setPersonalPatterns([])
   }
+})
+
+// ============================================================================
+// v0.6.5：attachments（会话图片/附件对象库）—— 模块表 / 界面分组 / 真进包
+// 背景：会话日志里的图片只是 `attachmentId` 引用，字节在 attachments/v1/objects；
+// 只备份 sessions 的包换机器恢复后图全裂。对象是内容寻址的，目标机不用改写任何引用。
+// ============================================================================
+test('§10 attachments：/status 暴露（默认迁移带、分享不带）、界面归入会话组、对象真进包且可原样写回', async () => {
+  // ① 模块表：/status 由 MODULES 驱动 → 新模块自动出现，预设标记如实
+  const st = await request('/status')
+  assert.equal(st.status, 200, st.text)
+  const m = st.data.modules.attachments
+  assert.ok(m, '/status 必须暴露 attachments 模块')
+  assert.equal(m.default, true, '迁移预设默认带附件（不带 = 恢复后会话里的图全裂）')
+  assert.equal(m.share, false, '分享预设绝不带附件')
+  assert.equal(m.count, 1, 'attachments 计数只算对象库，tmp 写入暂存不算')
+  assert.ok(m.bytes > 0, JSON.stringify(m))
+
+  // ② 界面：会话记录组必须同时映射 sessions 与 attachments（否则后端有、界面选不到）
+  const client = fs.readFileSync(path.join(import.meta.dirname, '..', 'lib', 'client.js'), 'utf-8')
+  const groupBlock = /const GROUPS = \[([\s\S]*?)\n\t\t\]/.exec(client)?.[1] || ''
+  const sessionsGroup = /id: "sessions"[\s\S]*?\}/.exec(groupBlock)?.[0] || ''
+  assert.match(sessionsGroup, /"sessions"/, sessionsGroup)
+  assert.match(sessionsGroup, /"attachments"/, sessionsGroup)
+
+  // ③ 分享模式：服务端强制拦截（不能只靠界面置灰）
+  const blocked = await request('/create', { method: 'POST', body: { modules: ['attachments'], mode: 'share' } })
+  assert.equal(blocked.status, 400, blocked.text)
+  assert.equal(blocked.data.code, 'share_scope')
+
+  // ④ 迁移模式：对象按内容寻址原样进包（二进制不脱敏、不改字节）
+  const job = await createPackJob({ modules: ['attachments'], mode: 'migrate' })
+  assert.ok(job.result.pack.modules.includes('attachments'), JSON.stringify(job.result.pack.modules))
+  const { buf, entries } = I.readZipFile(job.result.pack.path)
+  const entry = entries.find((x) => x.name.replace(/^\.\//, '') === ATTACH_REL)
+  assert.ok(entry, `包内应含 ${ATTACH_REL}，实际：${entries.map((x) => x.name).join(', ')}`)
+  assert.deepEqual(Buffer.from(I.readEntryData(buf, entry)), ATTACH_BYTES, '附件对象必须逐字节进包')
+
+  // ⑤ 写回：删掉目标机对象后从包恢复 → 同一相对路径重现（引用不用改写）
+  const objAbs = path.join(fakeHome, ATTACH_REL)
+  fs.rmSync(objAbs, { force: true })
+  const restored = await request('/restore/apply', {
+    method: 'POST',
+    body: { zip: job.result.pack.path, strategy: 'overwrite', modules: ['attachments'] },
+  })
+  assert.equal(restored.status, 200, restored.text)
+  assert.ok(restored.data.stats.added >= 1, JSON.stringify(restored.data.stats))
+  assert.deepEqual(fs.readFileSync(objAbs), ATTACH_BYTES, '附件对象必须按原相对路径写回')
 })
 

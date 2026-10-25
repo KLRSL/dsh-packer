@@ -4,21 +4,21 @@
 >
 > [简体中文](README.md) · [English](README.en.md)
 
-> **v0.6.4** · MIT License · DSH 0.2.x (`>=0.2.0-rc.2 <0.3.0-0`, tested on the 0.2.1-rc.3 desktop app) · Node ≥ 22.19.0
+> **v0.6.5** · MIT License · DSH 0.2.x (`>=0.2.0-rc.2 <0.3.0-0`, tested on the 0.2.1-rc.3 desktop app) · Node ≥ 22.19.0
 
 **dsh-packer** is the Agent Configuration Packer plugin for **DeepSeek Harness (DSH)**: it packs your local Agent assets, module by module, into standard zip archives, for two purposes:
 
 - **Migration** — move your entire setup to a new machine, or recover after a reinstall.
 - **Sharing** — hand Skills and other assets to other people, with sensitive content filtered automatically.
 
-Every module is optional (Skills / Sessions / Profiles / Settings / Presets / Memory); restore ships with diff reports and conflict strategies, and a privacy scan guards every pack — all capabilities are opt-in.
+Every module is optional (Skills / Sessions / Attachments / Profiles / Settings / Presets / Memory); restore ships with diff reports and conflict strategies, and a privacy scan guards every pack — all capabilities are opt-in.
 
 ## Features
 
 | Feature | Description |
 | --- | --- |
-| Modular packing | Seven modules, any combination: `skills` / `sessions` / `profiles` / `settings` / `presets` / `memory` (Markdown mirror) / `memoryDb` (**consistent SQLite snapshot of the memory truth source**, on by default) |
-| Two built-in presets | **Migrate** (everything) / **Share** (Skills only; sessions, memory data and personal skill subdirectories are automatically excluded) |
+| Modular packing | Nine modules, any combination: `skills` / `sessions` / `attachments` (**the bytes of images/files inside sessions**, on by default for migration) / `profiles` / `plugins` (**installed plugin bodies**, on by default for migration) / `settings` / `presets` / `memory` (Markdown mirror) / `memoryDb` (**consistent SQLite snapshot of the memory truth source**, on by default) |
+| Two built-in presets | **Migrate** (everything, including installed plugin bodies and session attachments) / **Share** (Skills only; sessions, attachments, memory data, plugins and personal skill subdirectories are automatically excluded) |
 | Privacy & security scan | Detects drive-letter / Unix / UNC paths, user-directory paths, credential assignments and bare key shapes (`sk-`, `ghp_`, `AKIA`, JWT, …), plus personal nicknames, counting **every occurrence**; **share mode hard-blocks on any hit, migrate mode reports only** |
 | File-level operation preview | Full file list preview before packing; diff report before restore (added / changed / same / skipped) |
 | Three conflict strategies | Overwrite / skip / merge (merge appends, never overwrites existing content) |
@@ -107,16 +107,20 @@ When it finishes, the zip is written to `~/.dsh/packs/` (override with `DSH_PACK
 | --- | --- | --- | --- |
 | `skills` | Skills (including the memory-mechanism skill), under `~/.dsh/skills` | ✅ | ✅ |
 | `sessions` | Session records (`.zstd` format), under `~/.dsh/sessions` | ✅ | ❌ |
+| `attachments` | **Session attachment object store**: the bytes of images/files inside sessions (content-addressed, under `~/.dsh/attachments/v1/objects`; excludes the rebuildable request-image cache and the `tmp` staging area) | ✅ | ❌ |
 | `profiles` | Profile configs (excluding `node_modules`), under `~/.dsh/profiles` | ✅ | ❌ |
+| `plugins` | **Installed plugin bodies** (top-level package directories in `profiles/<profile>/node_modules`); large | ✅ | ❌ |
 | `settings` | Global settings (`settings.yaml`) | ✅ | ❌ |
 | `presets` | Agent presets (`.agent-presets`) | ✅ | ❌ |
 | `memory` | **Memory mirror** (human-readable Markdown under `DSH_MEMORY_ROOT` or `~/.dsh/memory`, excluding `backups/`) | ✅ | ❌ |
 | `memoryDb` | **Memory truth source** (`<DSH_BIOMEMORY_DIR \|\| ~/.dsh/biomemory>/biomemory.db`): packed as a **consistent `VACUUM INTO` snapshot** (read-only connection, never touches a live WAL database); on failure the file is left out and reported under `unreadable` | ✅ | ❌ |
 
+**Session images live in `attachments`**: session logs only store an `attachmentId` reference (`sha256:<64hex>`); the bytes live under `~/.dsh/attachments/v1/objects`. Packing `sessions` alone would leave images broken after a restore (the history opens, but the image bytes are missing), so the **"Session records" group** in the settings page packs `sessions` + `attachments` together. Objects are content-addressed, so the target machine needs no reference rewriting.
+
 **The two built-in presets**:
 
 - **Migrate** — every module checked by default: ideal for relocating a whole environment.
-- **Share** — only `skills` is checked; sessions and memory data are excluded automatically, and personal skill subdirectories (`_shared`) are also excluded, keeping sensitive content out of the pack as much as possible.
+- **Share** — only `skills` is checked; sessions, attachments and memory data are excluded automatically, and personal skill subdirectories (`_shared`) are also excluded, keeping sensitive content out of the pack as much as possible.
 
 ## Privacy & security
 
@@ -242,6 +246,7 @@ The Settings page is one page in five blocks, following the packer's task chain:
 
 | Version | Date | Type | Highlights |
 | --- | --- | --- | --- |
+| **v0.6.5** | 2026-10-25 | **Session images/attachments now travel with migrations** | (1) New `attachments` module (root `~/.dsh/attachments`, `skipDirs: ['tmp']`, on by default for migration, never for sharing): session logs only hold an `{"type":"image","attachment":{"attachmentId":"sha256:…"}}` reference, while the bytes live under `attachments/v1/objects/<first2>/<sha256>` (content-addressed, deduplicated, append-only) — a pack with `sessions` alone leaves every session image broken after a restore. (2) `SENSITIVE_MODULES` gains `attachments`, so share mode is blocked server-side (not merely greyed out in the UI). (3) The "Session records" group in the settings page becomes `["sessions","attachments"]` (without it the backend module exists but the UI cannot select it). (4) `MEMORY_ROOT` now follows `DSH_HOME` (it used `os.homedir()`, diverging from memoryDb). (5) The module table gains `attachments` (plus the missing `plugins` row) and documents that session images live in `attachments` and the "Session records" group packs them; objects are content-addressed, so no reference rewriting is needed on restore. Tests 87 → 91. |
 | **v0.6.4** | 2026-10-25 | **Per-platform trash + manual path fallback** | (1) **Trash is dispatched per platform** (`recycleFileNative` contract unchanged: `true` on success, `false` when the platform has none, throw on failure → `deletePack` degrades and reports a warning): Windows keeps PowerShell `SendToRecycleBin`; macOS uses `osascript -e 'tell application "Finder" to delete POSIX file "<path>"'` (quote/backslash escaping, 30s timeout); Linux implements the freedesktop Trash spec in pure Node — the file moves to `$XDG_DATA_HOME/Trash/files/<name>` (defaults to `~/.local/share`, `.1` suffix on collisions) and `Trash/info/<name>.trashinfo` records `Path=` (URL-encoded absolute path) plus `DeletionDate=` (local time `YYYY-MM-DDThh:mm:ss`); HarmonyOS and everything else still return `false` (permanent delete + warning). (2) **Manual path**: the restore page keeps its "or type a pack path" entry; `/status` gains three platform capability fields (`platform` / `trash` / `filePicker`), so platforms without a system file picker (HarmonyOS) show "当前平台请直接填写包路径" and treat manual input as the primary entry, while the delete confirmation tells the truth (not recoverable). The web layer cannot obtain host paths, so no platform renders a dead picker button. (3) Path examples are platform-specific (`/storage/…`, `/home/…`, `/Users/…`). Tests 80 → 87. |
 | **v0.6.3** | 2026-10-25 | Docs / pack scope | **Cross-platform docs now ship inside the package**: `files` gains `docs`, so an installed plugin carries `docs/platform-support.md` (support matrix for Windows / macOS / Linux / HarmonyOS, plus the two limits: Recycle Bin and system file picker). No code or behavior change. |
 | **v0.6.2** | 2026-10-25 | Intro / copy | Rewrote the intro line; tested desktop version is now 0.2.1-rc.3. No functional change |

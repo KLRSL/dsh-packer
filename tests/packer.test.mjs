@@ -31,6 +31,15 @@ function makeAssets() {
   // sessions
   fs.mkdirSync(path.join(fakeHome, 'sessions'), { recursive: true })
   fs.writeFileSync(path.join(fakeHome, 'sessions', 's1.zstd'), Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x00]))
+  // 会话附件对象库（v0.6.5）：内容寻址、对象名 = sha256；tmp 是写入暂存，不该进包
+  const obj = '7b18612ba9dcf2983256870cfb100ea39f9cd616be300f1e8af8ab4ce903cb95'
+  fs.mkdirSync(path.join(fakeHome, 'attachments', 'v1', 'objects', obj.slice(0, 2)), { recursive: true })
+  fs.writeFileSync(
+    path.join(fakeHome, 'attachments', 'v1', 'objects', obj.slice(0, 2), obj),
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  )
+  fs.mkdirSync(path.join(fakeHome, 'attachments', 'v1', 'tmp'), { recursive: true })
+  fs.writeFileSync(path.join(fakeHome, 'attachments', 'v1', 'tmp', 'in-flight.png'), 'partial-write\n')
   // settings
   fs.writeFileSync(path.join(fakeHome, 'settings.yaml'), 'agent-default-model:\n  provider: deepseek-official\n')
   // presets
@@ -67,7 +76,7 @@ test('模块文件收集：skills 含全部子目录', async () => {
 })
 
 test('凭据文件永不打包', async () => {
-  for (const key of ['skills', 'sessions', 'profiles', 'settings', 'presets', 'memory']) {
+  for (const key of ['skills', 'sessions', 'attachments', 'profiles', 'settings', 'presets', 'memory']) {
     const files = await I.collectModuleFiles(I.MODULES[key])
     for (const f of files) {
       assert.ok(!f.rel.includes('.credentials'), `不应包含凭据: ${f.rel}`)
@@ -86,6 +95,31 @@ test('sessions 模块收集 .zstd 二进制', async () => {
   const files = await I.collectModuleFiles(I.MODULES.sessions)
   assert.equal(files.length, 1)
   assert.ok(files[0].rel.endsWith('.zstd'))
+})
+
+// v0.6.5：会话日志里的图片只是 `attachmentId` 引用，字节在 attachments/v1/objects——
+// 只备份 sessions = 换机器恢复后图全裂。下面守住「对象库进包、tmp 暂存不进包、默认带、分享不带」。
+test('attachments 模块：收对象库、跳过 tmp 暂存、默认迁移带上且分享绝不带', async () => {
+  const files = await I.collectModuleFiles(I.MODULES.attachments)
+  const rels = files.map((f) => f.rel)
+  const objectRel = rels.find((r) => /^v1\/objects\/[0-9a-f]{2}\/[0-9a-f]{64}$/.test(r))
+  assert.ok(objectRel, `attachments 必须收集内容寻址对象，实际：${JSON.stringify(rels)}`)
+  assert.ok(!rels.some((r) => r.startsWith('v1/tmp/')), `tmp 是写入暂存，不能进包：${JSON.stringify(rels)}`)
+  assert.equal(I.MODULES.attachments.resolve(), path.join(fakeHome, 'attachments'), '根目录必须跟随 DSH_HOME')
+  assert.equal(I.MODULES.attachments.default, true, '迁移预设必须默认带附件（否则恢复后会话里的图全裂）')
+  assert.equal(I.MODULES.attachments.share, false, '附件是用户的截图与文件，分享绝不带')
+  assert.ok(I.SENSITIVE_MODULES.includes('attachments'), '分享模式服务端必须拦截 attachments（不能只靠界面置灰）')
+})
+
+test('MEMORY_ROOT 跟随 DSH_HOME（不再另用 os.homedir()，与 memoryDb 同源）', () => {
+  const home = path.join(tmpRoot, 'home-memroot')
+  fs.mkdirSync(home, { recursive: true })
+  const entry = pathToFileURL(path.join(import.meta.dirname, '..', 'index.mjs')).href
+  const code = `import(${JSON.stringify(entry)}).then((m) => process.stdout.write(m.__internals.MEMORY_ROOT))`
+  const env = { ...process.env, DSH_HOME: home }
+  delete env.DSH_MEMORY_ROOT
+  const out = execFileSync(process.execPath, ['--input-type=module', '-e', code], { env, encoding: 'utf-8' }).trim()
+  assert.equal(out, path.join(home, 'memory'), `MEMORY_ROOT 应跟随 DSH_HOME，实际：${out}`)
 })
 
 test('记忆数据模块收集 hot 内容且跳过 backups', async () => {
@@ -929,6 +963,16 @@ test('一致性：host 的每个模块都能在客户端被渲染（无遗漏）
   const listed = new Set([...groupBlock.matchAll(/"([A-Za-z][\w]*)"/g)].map((m) => m[1]))
   const missing = hostModules.filter((m) => !listed.has(m))
   assert.deepEqual(missing, [], `这些 host 模块没有归入任何 UI 分组：${missing.join(', ')}`)
+})
+
+// v0.6.5：attachments 必须和 sessions 同组——只加 host 模块不加组，界面就选不到附件。
+test('一致性：「会话记录」组同时带上 sessions 与 attachments', () => {
+  const client = fs.readFileSync(path.join(import.meta.dirname, '..', 'lib', 'client.js'), 'utf-8')
+  const groupBlock = /const GROUPS = \[([\s\S]*?)\n\t\t\]/.exec(client)?.[1] || ''
+  const sessionsGroup = /id: "sessions"[\s\S]*?\}/.exec(groupBlock)?.[0] || ''
+  assert.ok(sessionsGroup, 'client.js 里应有会话记录组')
+  assert.match(sessionsGroup, /"sessions"/, sessionsGroup)
+  assert.match(sessionsGroup, /"attachments"/, `会话记录组必须同时包含 attachments：${sessionsGroup}`)
 })
 
 // ============================================================================

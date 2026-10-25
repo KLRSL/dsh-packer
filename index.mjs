@@ -2,8 +2,8 @@
 // dsh-packer — 配置打包器（Agent Config Packer for DeepSeek Harness）
 //
 // 把本地 Agent 资产按模块打包成 zip（迁移/分享两用），支持：
-//   1. 模块打包：Skills / 会话记录 / Profile 配置 / 全局设置 / Agent 预设 / 记忆数据
-//   2. 双模式预设：迁移全选 / 分享精选（分享自动排除会话与记忆数据）
+//   1. 模块打包：Skills / 会话记录 / 会话附件对象库 / Profile 配置 / 全局设置 / Agent 预设 / 记忆数据
+//   2. 双模式预设：迁移全选 / 分享精选（分享自动排除会话、附件与记忆数据）
 //   3. 隐私安全扫描：打包前检测本地路径/用户名/API key/个人昵称，分享模式强制拦截
 //   4. 文件级操作清单：打包/恢复前预览具体文件操作
 //   5. 包管理：列表 / 详情（顺带逐文件 SHA-256 校验）/ 重命名 / 删除
@@ -20,6 +20,8 @@
 //      含凭据又未加密时用 warnings[] 明确告警。share 模式强制 sanitize=true。
 //      恢复 sanitized 包时回填 <用户目录> / <用户名>，其余占位符保留并计入 stats.warnings。
 //      另新增 plugins 模块：迁移时带上 profiles/<profile>/node_modules 的一级包目录。
+//  11. v0.6.5：会话里的图片/附件以 `attachmentId` 引用存在，字节在 <DSH_HOME>/attachments——
+//      新增 attachments 模块（内容寻址，恢复后引用不用改写），并修正 MEMORY_ROOT 跟随 DSH_HOME。
 //
 // 异步 IO（v0.2.4）：全部文件与子进程操作走 node:fs/promises + execFile，
 //   对外 API 一律返回 Promise（可 await），调用点（/pack 命令、Web API）全链路 async。
@@ -70,7 +72,7 @@ const execFileAsync = promisify(execFile)
 
 const DSH_HOME = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
 const PACKS_DIR = process.env.DSH_PACKS_DIR || path.join(DSH_HOME, 'packs')
-const MEMORY_ROOT = process.env.DSH_MEMORY_ROOT || path.join(os.homedir(), '.dsh', 'memory')
+const MEMORY_ROOT = process.env.DSH_MEMORY_ROOT || path.join(DSH_HOME, 'memory')
 
 const SCHEMA_VERSION = 1
 const NEVER_PACK = ['.credentials.yaml', '.anonymous-user-id']
@@ -97,7 +99,7 @@ const TRASH_PLATFORMS = new Set(['win32', 'darwin', 'linux'])
 const FILE_PICKER_PLATFORMS = new Set(['win32', 'darwin', 'linux'])
 
 /** 分享模式服务端强制拦截的敏感模块（契约 §3：不能只靠 UI 置灰） */
-const SENSITIVE_MODULES = ['sessions', 'profiles', 'settings', 'presets', 'memory', 'memoryDb', 'plugins']
+const SENSITIVE_MODULES = ['sessions', 'attachments', 'profiles', 'settings', 'presets', 'memory', 'memoryDb', 'plugins']
 /** 恢复策略白名单（fail-closed：非法值 400 bad_strategy，不再退化成 overwrite） */
 const RESTORE_STRATEGIES = new Set(['overwrite', 'skip', 'merge'])
 /** 包文件名：.zip（明文）或 .pkenc（加密）；其余文件一律不当成包 */
@@ -173,6 +175,20 @@ const MODULES = {
     resolve: () => path.join(DSH_HOME, 'sessions'),
     default: true,
     share: false,
+  },
+  attachments: {
+    // v0.6.5：会话里的图片/文件**不在** sessions 日志里——日志只存 `{"type":"image",
+    // "attachment":{"attachmentId":"sha256:<64hex>"}}` 这样的引用，字节在
+    // <DSH_HOME>/attachments/v1/objects/<前2位>/<sha256>（内容寻址、去重、只增不删）。
+    // 所以只备份 sessions = 换机器恢复后图全裂：本模块补上对象库本身。
+    // 根取 attachments（含 v1/objects、v1/file-objects、v1/files）；tmp 是写入暂存，不备份。
+    // 对象名就是内容哈希，目标机不需要改写会话日志里的任何引用。
+    label: '会话附件对象库（图片/文件；内容寻址，不含可重建的请求图片缓存）',
+    kind: 'dir',
+    resolve: () => path.join(DSH_HOME, 'attachments'),
+    default: true,   // 迁移预设带上：不带就等于恢复后会话里的图片全裂
+    share: false,    // 附件就是用户的截图与文件，分享绝不带
+    skipDirs: ['tmp'],
   },
   profiles: {
     label: 'Profile 配置（不含 node_modules）',

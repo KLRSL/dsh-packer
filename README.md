@@ -4,21 +4,21 @@
 >
 > [简体中文](README.md) · [English](README.en.md)
 
-> **v0.6.4** · MIT License · DSH 0.2.x（`>=0.2.0-rc.2 <0.3.0-0`，0.2.1-rc.3 桌面版实测）· Node ≥ 22.19.0
+> **v0.6.5** · MIT License · DSH 0.2.x（`>=0.2.0-rc.2 <0.3.0-0`，0.2.1-rc.3 桌面版实测）· Node ≥ 22.19.0
 
 dsh-packer 是 [DeepSeek Harness](https://github.com/deepseek-ai/dsh)（DSH）的「Agent 配置打包器」插件：把本地 Agent 资产按模块打包成标准 zip，用于两种场景：
 
 - **迁移** —— 换机器或重装后，把整套环境完整搬过去。
 - **分享** —— 把 Skills 等资产交给别人，敏感内容自动拦截。
 
-打包内容可按模块自由组合（Skills / 会话 / Profile / 设置 / 预设 / 记忆），恢复带差异对比与冲突策略，隐私安全扫描全程护航——全部能力按需开启。
+打包内容可按模块自由组合（Skills / 会话 / 附件 / Profile / 设置 / 预设 / 记忆），恢复带差异对比与冲突策略，隐私安全扫描全程护航——全部能力按需开启。
 
 ## 功能特性
 
 | 特性 | 说明 |
 | --- | --- |
-| 模块化打包 | 八个模块任意组合：`skills` / `sessions` / `profiles` / `plugins`（**已安装插件的本体**，默认迁移带上）/ `settings` / `presets` / `memory`（Markdown 镜像）/ `memoryDb`（**记忆真库 SQLite 一致快照**，默认带上） |
-| 双模式预设 | **迁移**（全选，含已装插件本体）/ **分享**（只勾 Skills，自动排除会话、记忆、插件与个人 skill 子目录） |
+| 模块化打包 | 九个模块任意组合：`skills` / `sessions` / `attachments`（**会话里图片/附件的字节**，迁移默认带上）/ `profiles` / `plugins`（**已安装插件的本体**，默认迁移带上）/ `settings` / `presets` / `memory`（Markdown 镜像）/ `memoryDb`（**记忆真库 SQLite 一致快照**，默认带上） |
+| 双模式预设 | **迁移**（全选，含已装插件本体与会话附件）/ **分享**（只勾 Skills，自动排除会话、附件、记忆、插件与个人 skill 子目录） |
 | 隐私扫描 + **真处理** | 检测盘符 / Unix / UNC 路径、用户目录路径、疑似密钥赋值、密钥形状（`sk-`、`ghp_`、`AKIA`、JWT）、个人昵称；命中后**不再只是提示**，打包页给两选：**清理后打包**（只改包内副本：路径→占位符、密钥→`<已移除的密钥>`，源文件不动；分享模式强制）/ **不清理直接打包**（保真，靠口令保护；含凭据又未加密时明确告警） |
 | 脱敏安全兜底 | 单遍最左扫描 + 结构字符排除 → 不会吃掉引号/括号/逗号；`.json`/`.jsonl` 脱敏后真跑解析校验、行数缩进必须不变，否则**整文件回退原文**并记 warning；非 UTF-8 文件不脱敏。限制：YAML 无解析器证明（零依赖），极端写法仍可能产生语义差异 |
 | 文件级操作预览 | 打包前预览完整文件清单；恢复前差异报告（新增 / 变更 / 相同 / 跳过） |
@@ -108,16 +108,20 @@ dsh plugin --profile desktop add link:./dsh-packer
 | --- | --- | --- | --- |
 | `skills` | Skills（含记忆机制 skill），位于 `~/.dsh/skills` | ✅ | ✅ |
 | `sessions` | 会话记录（`.zstd` 格式），位于 `~/.dsh/sessions` | ✅ | ❌ |
+| `attachments` | **会话附件对象库**：会话里的图片/文件字节（内容寻址，位于 `~/.dsh/attachments/v1/objects`；不含可重建的请求图片缓存与 `tmp` 暂存） | ✅ | ❌ |
 | `profiles` | Profile 配置（不含 `node_modules`），位于 `~/.dsh/profiles` | ✅ | ❌ |
+| `plugins` | **已安装插件本体**（`profiles/<profile>/node_modules` 的一级包目录），体积大 | ✅ | ❌ |
 | `settings` | 全局设置（`settings.yaml`） | ✅ | ❌ |
 | `presets` | Agent 预设（`.agent-presets`） | ✅ | ❌ |
 | `memory` | **记忆镜像**（Markdown 只读副本，位于 `DSH_MEMORY_ROOT` 或 `~/.dsh/memory`；不含 `backups/`） | ✅ | ❌ |
 | `memoryDb` | **记忆真库**（`<DSH_BIOMEMORY_DIR \|\| ~/.dsh/biomemory>/biomemory.db`）：打包时用 `VACUUM INTO` 取**一致快照**（只读连接、不碰运行中的 WAL），快照失败则该文件不进包并计入 `unreadable` | ✅ | ❌ |
 
+**会话里的图片在 `attachments`**：会话日志里的图片只是 `attachmentId` 引用（`sha256:<64hex>`），字节在 `~/.dsh/attachments/v1/objects`。只备份 `sessions` 的话，恢复后的会话里图片会裂（能打开历史，但图取不到字节）；设置页选**「会话记录」组**（= `sessions` + `attachments`）会一起打包。对象是内容寻址的，目标机不需要改写任何引用。
+
 **双模式预设**：
 
 - **迁移** —— 全部模块默认勾选，适合搬迁整套环境。
-- **分享** —— 只勾 `skills`；会话与记忆数据自动排除，个人 skill 子目录（`_shared`）在分享时也会排除，让敏感内容尽可能少进包。
+- **分享** —— 只勾 `skills`；会话、附件与记忆数据自动排除，个人 skill 子目录（`_shared`）在分享时也会排除，让敏感内容尽可能少进包。
 
 ## 隐私与安全
 
@@ -251,6 +255,7 @@ dsh plugin --profile desktop add link:./dsh-packer
 
 | 版本 | 日期 | 类型 | 要点 |
 | --- | --- | --- | --- |
+| **v0.6.5** | 2026-10-25 | **会话图片/附件进包（换机迁移硬缺口）** | ①新增 `attachments` 模块（根 `~/.dsh/attachments`、`skipDirs: ['tmp']`、迁移默认带、分享不带）：会话日志里的图片只是 `{"type":"image","attachment":{"attachmentId":"sha256:…"}}` 引用，字节在 `attachments/v1/objects/<前2位>/<sha256>`（内容寻址、去重、只增不删）——只备份 `sessions` 的包，换机器恢复后会话里图片全裂。②`SENSITIVE_MODULES` 加 `attachments`，分享模式服务端强制拦截（不只靠界面置灰）。③设置页「会话记录」组改为 `["sessions","attachments"]`（不改 = 后端有模块、界面选不到）。④修正 `MEMORY_ROOT` 改用 `DSH_HOME`（此前用 `os.homedir()`，与 memoryDb 不同源）。⑤模块表补 `attachments`（顺带补漏写的 `plugins` 行）并写明「会话里的图片在 attachments，选『会话记录』组会一起打包」；对象内容寻址，恢复时无需改写引用。测试 87 → 91。 |
 | **v0.6.4** | 2026-10-25 | **回收站三平台分派 + 手填路径兜底** | ①**回收站按平台分派**（`recycleFileNative` 契约不变：成功 `true` / 平台不支持 `false` / 调用失败抛错→`deletePack` 降级并回报 warning）：Windows 保持 PowerShell `SendToRecycleBin`；macOS 用 `osascript -e 'tell application "Finder" to delete POSIX file "<path>"'`（引号/反斜杠转义，30s 超时）；Linux 按 freedesktop Trash 规范纯 Node 实现——文件移入 `$XDG_DATA_HOME/Trash/files/<name>`（缺省 `~/.local/share`，同名加 `.1` 后缀），`Trash/info/<name>.trashinfo` 写 `Path=`（URL 编码绝对路径）与 `DeletionDate=`（本地时间 `YYYY-MM-DDThh:mm:ss`）；鸿蒙/其他仍返回 `false`（永久删除 + warning）。②**手填路径**：恢复页「或填包路径」入口保留；`/status` 新增 `platform` / `trash` / `filePicker` 三个平台能力字段，没有系统文件选择框的平台（鸿蒙）上提示「当前平台请直接填写包路径」并以其为主入口，删除确认文案改为如实告知不可恢复；本插件在网页层拿不到宿主机路径，因此任何平台都不渲染点了没反应的选择框按钮。③路径示例按平台给（`/storage/…`、`/home/…`、`/Users/…`）。测试 80 → 87。 |
 | **v0.6.3** | 2026-10-25 | 文档 / 打包范围 | **多平台通用文档随包发布**：`files` 补 `docs`，装好插件后包内自带 `docs/platform-support.md`（Windows / macOS / Linux / 鸿蒙 的支持范围，及两处受限项：回收站、系统文件选择框）；代码与功能无变更。 |
 | **v0.6.2** | 2026-10-25 | 简介 / 文案 | 首段改成「封箱 / 开箱」的说法，桌面版实测版本改 0.2.1-rc.3；功能无变更 |
