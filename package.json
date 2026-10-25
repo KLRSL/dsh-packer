@@ -1,7 +1,7 @@
 {
   "name": "dsh-packer",
   "description": "Packs Skills, sessions, installed plugins and settings into one zip and restores them on a new machine; sanitize or encrypt sensitive content.",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "type": "module",
   "main": "./index.mjs",
   "exports": {
@@ -69,6 +69,7 @@
     "lib",
     "cordis.patch.yml",
     "locale",
+    "docs",
     "README.md",
     "README.en.md",
     "LICENSE"
