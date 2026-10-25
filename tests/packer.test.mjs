@@ -955,3 +955,111 @@ test('归档：纯 JS zip 往返（deflate + stored + UTF-8 名），且不依�
   fs.rmSync(dir, { recursive: true, force: true })
   fs.rmSync(out, { recursive: true, force: true })
 })
+
+// ============================================================================
+// v0.6.4：回收站按平台分派（Windows / macOS / Linux）—— 鸿蒙仍为 false
+// ============================================================================
+test('回收站分派：平台标识归一化（鸿蒙别名 → harmony），只有三平台有系统回收站', () => {
+  assert.equal(I.platformTag('win32'), 'win32')
+  assert.equal(I.platformTag('darwin'), 'darwin')
+  assert.equal(I.platformTag('linux'), 'linux')
+  assert.equal(I.platformTag('ohos'), 'harmony')
+  assert.equal(I.platformTag('OpenHarmony'), 'harmony')
+  assert.equal(I.platformTag('HarmonyOS'), 'harmony')
+  for (const p of ['win32', 'darwin', 'linux']) {
+    assert.equal(I.hasSystemTrash(p), true, `${p} 应有系统回收站`)
+    assert.equal(I.hasSystemFilePicker(p), true, `${p} 宿主应有系统文件选择框`)
+  }
+  for (const p of ['ohos', 'openharmony', 'freebsd', 'aix', '']) {
+    assert.equal(I.hasSystemTrash(p), false, `${p} 不应声称有回收站`)
+    assert.equal(I.hasSystemFilePicker(p), false, `${p} 不应声称有文件选择框`)
+  }
+})
+
+test('回收站分派：鸿蒙/未知平台返回 false（走永久删除 + warning），且不动文件', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'packer-recycle-none-'))
+  const file = path.join(dir, 'keep.txt')
+  fs.writeFileSync(file, 'x')
+  for (const platform of ['ohos', 'openharmony', 'freebsd']) {
+    assert.equal(await I.recycleFileNative(file, platform), false)
+  }
+  assert.equal(fs.existsSync(file), true, '不支持的平台不得动文件（降级删除由 deletePack 负责）')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('回收站 macOS：命令拼装 = osascript + Finder 删除，注入 exec 后返回 true', async () => {
+  assert.equal(I.escapeAppleScriptString('a"b'), 'a\\"b', '双引号必须转义')
+  assert.equal(I.escapeAppleScriptString('a\\b'), 'a\\\\b', '反斜杠必须转义')
+  const args = I.buildMacRecycleArgs('/Users/me/带 "引号" 的\\包.zip')
+  assert.equal(args.length, 2)
+  assert.equal(args[0], '-e')
+  assert.equal(args[1], 'tell application "Finder" to delete POSIX file "/Users/me/带 \\"引号\\" 的\\\\包.zip"')
+
+  const calls = []
+  const fakeExec = async (command, execArgs, opts) => { calls.push({ command, execArgs, opts }); return { stdout: '', stderr: '' } }
+  assert.equal(await I.recycleFileMac('/tmp/x.zip', fakeExec), true)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].command, 'osascript')
+  assert.deepEqual(calls[0].execArgs, I.buildMacRecycleArgs('/tmp/x.zip'))
+  assert.equal(typeof calls[0].opts.timeout, 'number', '必须带超时（超时由 deletePack 降级）')
+})
+
+test('回收站 macOS：osascript 失败必须抛出（交给 deletePack 降级并回报 warning）', async () => {
+  const fakeExec = async () => { throw new Error('osascript: Finder 拒绝') }
+  await assert.rejects(() => I.recycleFileMac('/tmp/x.zip', fakeExec), /Finder 拒绝/)
+})
+
+test('回收站 Linux：按 freedesktop 规范生成 files/ 与 info/，trashinfo 内容正确', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'packer-trash-'))
+  const dataHome = path.join(root, 'xdg-data')
+  const srcDir = path.join(root, 'src')
+  fs.mkdirSync(srcDir, { recursive: true })
+  const src = path.join(srcDir, '迁移 包.zip')
+  fs.writeFileSync(src, 'PAYLOAD')
+  const now = new Date(2026, 0, 2, 3, 4, 5) // 本地时间 → DeletionDate 断言与系统时区无关
+  assert.equal(await I.recycleFileLinux(src, { xdgDataHome: dataHome, now }), true)
+
+  const filesDir = path.join(dataHome, 'Trash', 'files')
+  const infoDir = path.join(dataHome, 'Trash', 'info')
+  assert.ok(fs.statSync(filesDir).isDirectory(), 'files/ 必须被创建')
+  assert.ok(fs.statSync(infoDir).isDirectory(), 'info/ 必须被创建')
+  assert.equal(fs.existsSync(src), false, '源文件必须已从原位置移走')
+  assert.equal(fs.readFileSync(path.join(filesDir, '迁移 包.zip'), 'utf-8'), 'PAYLOAD')
+
+  const info = fs.readFileSync(path.join(infoDir, '迁移 包.zip.trashinfo'), 'utf-8')
+  const lines = info.split('\n')
+  assert.equal(lines[0], '[Trash Info]', '第一行必须是段名')
+  assert.equal(lines[1], 'Path=' + I.encodeTrashPath(path.resolve(src)), 'Path 必须是原绝对路径的 URL 编码')
+  assert.match(lines[1], /%20/, '路径里的空格必须 percent-encode')
+  assert.equal(lines[2], 'DeletionDate=2026-01-02T03:04:05', 'DeletionDate 必须是本地时间 YYYY-MM-DDThh:mm:ss')
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('回收站 Linux：同名冲突加 .1 后缀（files/ 与 info/ 都不覆盖）', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'packer-trash-dup-'))
+  const dataHome = path.join(root, 'xdg')
+  const a = path.join(root, 'a')
+  const b = path.join(root, 'b')
+  fs.mkdirSync(a, { recursive: true })
+  fs.mkdirSync(b, { recursive: true })
+  fs.writeFileSync(path.join(a, 'same.zip'), 'FIRST')
+  fs.writeFileSync(path.join(b, 'same.zip'), 'SECOND')
+  await I.recycleFileLinux(path.join(a, 'same.zip'), { xdgDataHome: dataHome })
+  await I.recycleFileLinux(path.join(b, 'same.zip'), { xdgDataHome: dataHome })
+  const filesDir = path.join(dataHome, 'Trash', 'files')
+  const infoDir = path.join(dataHome, 'Trash', 'info')
+  assert.deepEqual(fs.readdirSync(filesDir).sort(), ['same.zip', 'same.zip.1'])
+  assert.deepEqual(fs.readdirSync(infoDir).sort(), ['same.zip.1.trashinfo', 'same.zip.trashinfo'])
+  assert.equal(fs.readFileSync(path.join(filesDir, 'same.zip'), 'utf-8'), 'FIRST', '先来的保持原文件名')
+  assert.equal(fs.readFileSync(path.join(filesDir, 'same.zip.1'), 'utf-8'), 'SECOND')
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('回收站 Linux：XDG_DATA_HOME 缺省为 ~/.local/share，Path 编码规则符合规范', () => {
+  assert.equal(I.trashDataHome({}, path.join('/home', 'u')), path.join('/home', 'u', '.local', 'share'))
+  assert.equal(I.trashDataHome({ XDG_DATA_HOME: '/x/data' }, '/home/u'), '/x/data')
+  // 逐段编码、保留 `/` 分隔符（freedesktop 的 Path= 是 URL 编码的绝对路径）
+  assert.equal(I.encodeTrashPath('/home/u/a b/中文.txt'), '/home/u/a%20b/%E4%B8%AD%E6%96%87.txt')
+  assert.equal(I.formatTrashDate(new Date(2026, 11, 31, 23, 59, 58)), '2026-12-31T23:59:58')
+})
+

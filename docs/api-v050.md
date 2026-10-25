@@ -38,9 +38,15 @@
   "packs": [ { "name","mode","createdAt","note","fileCount","totalBytes","encrypted" } ],
   "packsDir": "…",
   "schemaVersion": 1,
-  "disk": { "packsBytes": 0 } }
+  "disk": { "packsBytes": 0 },
+  "platform": "win32 | darwin | linux | harmony | other",
+  "trash": false,
+  "filePicker": false }
 ```
 **删掉**：`trashCount`、`retention`、`autoBackup`、`disk.trashBytes`。
+**v0.6.4 追加**：`platform`（归一化平台标识，鸿蒙统一为 `harmony`）、`trash`（当前平台有没有系统回收站）、
+`filePicker`（宿主机有没有系统文件选择框）。UI 据此决定回收站文案，以及在**没有选择框的平台**（鸿蒙）把
+「手填包路径」当主入口并提示「当前平台请直接填写包路径」。
 
 ## 3. `/packs/:name/info` 新形状（合并 verify）
 
@@ -54,12 +60,13 @@
 - 校验必须逐个文件重算 SHA-256（与 manifest 比对）；加密包需 `password`，无/错口令 → 400 `bad_password`。
 - verify 失败**不是**错误响应（200 + failures 数组），UI 显示红字。
 
-## 4. DELETE `/packs/:name` → Windows 回收站
+## 4. DELETE `/packs/:name` → 系统回收站
 
 - Windows：用 PowerShell 5.1 自带 `Microsoft.VisualBasic.FileIO.FileSystem::DeleteFile(..., RecycleOption::SendToRecycleBin)`（`execFile('powershell', ['-NoProfile','-NonInteractive','-Command', …])`），成功返回 `{ ok:true, recycled:true }`。
-- 非 Windows 或 PowerShell 失败：降级为永久删除并返回 `{ ok:true, recycled:false, warning:"…" }`（**不得静默**）。
+- **v0.6.4 起按平台分派**（契约不变）：macOS 走 `osascript` 让 Finder 删除（进废纸篓）；Linux 按 freedesktop Trash 规范纯 Node 实现（`$XDG_DATA_HOME/Trash/files` + `info/<name>.trashinfo`）；详见 `docs/platform-support.md` 第四节。
+- 该平台没有回收站（鸿蒙等）或系统命令失败：降级为永久删除并返回 `{ ok:true, recycled:false, warning:"…" }`（**不得静默**）。
 - 同步删除同名 `.json` 摘要；`.pkenc` 同样适用。
-- 「零外部命令」的表述要限定：**zip 读写零外部命令**；删除进回收站属 Windows 系统能力，如实写进 README。
+- 「零外部命令」的表述要限定：**zip 读写零外部命令**；删除进回收站属系统能力（Windows PowerShell / macOS osascript；Linux 纯 Node），如实写进 README。
 
 ## 5. `/create` 结果新增 `packPath`
 

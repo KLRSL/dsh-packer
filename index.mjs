@@ -82,8 +82,19 @@ const DB_FILE_RE = /(^|\.)db(-wal|-shm|-journal)?$|\.sqlite3?$/i
 
 /** 恢复备份目录（applyRestore 的目标备份 + journal，用于 /restore/rollback） */
 const RESTORE_BACKUP_DIR = '.restore-backups'
-/** 送系统回收站的 PowerShell 调用超时（毫秒）：超时即视为失败并降级，不无限挂住请求 */
+/** 送系统回收站的外部命令调用超时（毫秒）：超时即视为失败并降级，不无限挂住请求 */
 const RECYCLE_TIMEOUT_MS = 30_000
+/**
+ * 有系统回收站的平台（v0.6.4 起按平台分派：Windows PowerShell / macOS Finder / Linux freedesktop Trash）。
+ * 其余平台（鸿蒙、未知）返回 false，由 deletePack 降级为永久删除并回报 warning。
+ */
+const TRASH_PLATFORMS = new Set(['win32', 'darwin', 'linux'])
+/**
+ * 宿主能提供系统文件选择框的平台。
+ * 注意：网页层拿不到宿主机路径，所以本插件**不渲染**任何「添加文件/浏览」按钮；
+ * 这张表只用于判断「当前平台要不要把『手填包路径』当主入口提示」（鸿蒙等平台为 false）。
+ */
+const FILE_PICKER_PLATFORMS = new Set(['win32', 'darwin', 'linux'])
 
 /** 分享模式服务端强制拦截的敏感模块（契约 §3：不能只靠 UI 置灰） */
 const SENSITIVE_MODULES = ['sessions', 'profiles', 'settings', 'presets', 'memory', 'memoryDb', 'plugins']
@@ -1265,31 +1276,177 @@ async function listPacks() {
   return out
 }
 
-// ---------- 删除：送进 Windows 系统回收站（契约 §4） ----------
+// ---------- 删除：按平台送进系统回收站（契约 §4，v0.6.4 三平台分派） ----------
 
 /**
- * 把单个文件送进 Windows 系统回收站（默认实现）。
- * 只用 PowerShell 5.1 自带的 Microsoft.VisualBasic.FileIO.FileSystem，不装任何模块/依赖。
- * 返回 true = 已移入回收站；false = 当前环境不支持（非 Windows）。
- * 调用失败（PowerShell 缺失/被杀/超时/报错）直接抛出，由 deletePack 降级并如实回报，绝不静默。
+ * 归一化平台标识：鸿蒙的 Node 可能报 ohos / openharmony / harmonyos，统一成 'harmony'。
+ * 其余平台原样返回（win32 / darwin / linux / 其它）。
  */
-async function recycleFileNative(filePath) {
-  if (process.platform !== 'win32') return false
-  // PowerShell 单引号字符串：内部单引号翻倍转义（避免路径里的引号被当成语句边界）
-  const psString = (s) => `'${String(s).replace(/'/g, "''")}'`
+function platformTag(platform = process.platform) {
+  const p = String(platform || '').toLowerCase()
+  if (p === 'ohos' || p.includes('harmony')) return 'harmony'
+  return p
+}
+
+/** 当前平台是否有系统回收站（win32 / darwin / linux → true；鸿蒙/未知 → false） */
+function hasSystemTrash(platform = process.platform) {
+  return TRASH_PLATFORMS.has(platformTag(platform))
+}
+
+/**
+ * 当前平台的宿主是否有系统文件选择框（鸿蒙等 → false）。
+ * 本插件在网页层拿不到宿主机路径，因此任何平台都**不渲染**选择框按钮；
+ * 这个判断只决定「是否把『手填包路径』当主入口并在界面提示」。
+ */
+function hasSystemFilePicker(platform = process.platform) {
+  return FILE_PICKER_PLATFORMS.has(platformTag(platform))
+}
+
+/** PowerShell 单引号字符串：内部单引号翻倍转义（避免路径里的引号被当成语句边界） */
+function psSingleQuoted(value) {
+  return `'${String(value).replace(/'/g, "''")}'`
+}
+
+/**
+ * Windows：PowerShell 5.1 自带的 Microsoft.VisualBasic.FileIO.FileSystem::DeleteFile(..., SendToRecycleBin)。
+ * 不装任何模块/依赖（v0.5.0 起的既有实现，v0.6.4 行为保持不变）。
+ */
+async function recycleFileWindows(filePath, exec = execFileAsync) {
   const script = 'Add-Type -AssemblyName Microsoft.VisualBasic; '
-    + `[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(${psString(filePath)}, 'OnlyErrorDialogs', 'SendToRecycleBin')`
-  await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    + `[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(${psSingleQuoted(filePath)}, 'OnlyErrorDialogs', 'SendToRecycleBin')`
+  await exec('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
     windowsHide: true,
     timeout: RECYCLE_TIMEOUT_MS,
   })
   return true
 }
 
+/** AppleScript 字符串字面量转义：先反斜杠再双引号（顺序反了会双重转义） */
+function escapeAppleScriptString(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+}
+
+/**
+ * macOS：让 Finder 删除 `tell application "Finder" to delete POSIX file "<path>"`。
+ * 纯函数（只拼命令不执行）→ 在 Windows 上也能单测「命令拼装」。
+ */
+function buildMacRecycleArgs(filePath) {
+  return ['-e', `tell application "Finder" to delete POSIX file "${escapeAppleScriptString(filePath)}"`]
+}
+
+/** macOS：osascript 调 Finder 删除（进废纸篓）；失败/超时抛出，由 deletePack 降级并回报 */
+async function recycleFileMac(filePath, exec = execFileAsync) {
+  await exec('osascript', buildMacRecycleArgs(filePath), { timeout: RECYCLE_TIMEOUT_MS })
+  return true
+}
+
+/**
+ * freedesktop Trash 规范的根目录：`$XDG_DATA_HOME`（缺省 `~/.local/share`）+ `Trash`。
+ */
+function trashDataHome(env = process.env, homeDir = os.homedir()) {
+  const xdg = typeof env.XDG_DATA_HOME === 'string' ? env.XDG_DATA_HOME.trim() : ''
+  return xdg || path.join(homeDir, '.local', 'share')
+}
+
+/**
+ * `.trashinfo` 的 `Path=` 值：逐段 percent-encode、保留 `/` 分隔符。
+ * 例：`/home/u/a b/中文.txt` → `/home/u/a%20b/%E4%B8%AD%E6%96%87.txt`
+ */
+function encodeTrashPath(absPath) {
+  return String(absPath).split('/').map((seg) => encodeURIComponent(seg)).join('/')
+}
+
+/** `.trashinfo` 的 `DeletionDate=` 值：本地时间 `YYYY-MM-DDThh:mm:ss`（规范要求，不带时区） */
+function formatTrashDate(date = new Date()) {
+  const p = (n) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`
+    + `T${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`
+}
+
+/** 一份 `.trashinfo` 的内容：`[Trash Info]` 段 + Path + DeletionDate */
+function buildTrashInfo(absPath, date = new Date()) {
+  return `[Trash Info]\nPath=${encodeTrashPath(absPath)}\nDeletionDate=${formatTrashDate(date)}\n`
+}
+
+/** files/ 与 info/ 都必须没占用才算可用名；冲突按规范加 `.1` / `.2` … 后缀 */
+async function uniqueTrashBaseName(filesDir, infoDir, baseName) {
+  let candidate = baseName
+  for (let i = 1; i <= 1000; i += 1) {
+    const inFiles = await exists(path.join(filesDir, candidate))
+    const inInfo = await exists(path.join(infoDir, `${candidate}.trashinfo`))
+    if (!inFiles && !inInfo) return candidate
+    candidate = `${baseName}.${i}`
+  }
+  throw new Error('回收站同名文件过多（>1000）')
+}
+
+/**
+ * Linux：按 freedesktop Trash 规范把文件移进回收站（纯 Node，不调外部命令）。
+ * - 文件 → `$XDG_DATA_HOME/Trash/files/<name>`（缺省 `~/.local/share`），同名冲突加后缀；
+ * - 记录 → `$XDG_DATA_HOME/Trash/info/<name>.trashinfo`（Path URL 编码 + 本地时间 DeletionDate）。
+ * @param {string} filePath 源文件路径
+ * @param {{ env?: Record<string, string|undefined>, homeDir?: string, xdgDataHome?: string, now?: Date }} [opts] 测试注入点
+ */
+async function recycleFileLinux(filePath, opts = {}) {
+  const env = opts.env || process.env
+  const homeDir = opts.homeDir || os.homedir()
+  const dataHome = opts.xdgDataHome || trashDataHome(env, homeDir)
+  const filesDir = path.join(dataHome, 'Trash', 'files')
+  const infoDir = path.join(dataHome, 'Trash', 'info')
+  const abs = path.resolve(filePath)
+  const stat = await fsp.stat(abs)
+  if (!stat.isFile()) throw new Error('只支持把普通文件移入回收站')
+  await fsp.mkdir(filesDir, { recursive: true })
+  await fsp.mkdir(infoDir, { recursive: true })
+  const name = await uniqueTrashBaseName(filesDir, infoDir, path.basename(abs))
+  const dest = path.join(filesDir, name)
+  const infoPath = path.join(infoDir, `${name}.trashinfo`)
+  // 先写 .trashinfo 再挪文件：挪失败就把 info 回滚掉，绝不留「有记录没文件」的空壳
+  await fsp.writeFile(infoPath, buildTrashInfo(abs, opts.now), { mode: 0o600 })
+  try {
+    await fsp.rename(abs, dest)
+  } catch (err) {
+    if (err?.code !== 'EXDEV') {
+      await fsp.rm(infoPath, { force: true })
+      throw err
+    }
+    // 跨设备（源文件与回收站不在同一分区）：复制 + 删源
+    try {
+      await fsp.copyFile(abs, dest)
+      await fsp.unlink(abs)
+    } catch (copyErr) {
+      await fsp.rm(dest, { force: true })
+      await fsp.rm(infoPath, { force: true })
+      throw copyErr
+    }
+  }
+  return true
+}
+
+/**
+ * 把单个文件送进系统回收站（默认实现，v0.6.4 起按平台分派）。
+ * - Windows：PowerShell + SendToRecycleBin；
+ * - macOS：osascript 让 Finder 删除（进废纸篓）；
+ * - Linux：freedesktop Trash（纯 Node 实现）；
+ * - 鸿蒙 / 其它：返回 false（JS 层拿不到 ArkTS 的 @ohos.file.trash，仍走永久删除 + warning）。
+ * 调用失败（命令缺失/被杀/超时/报错）直接抛出，由 deletePack 降级并如实回报，绝不静默。
+ * @param {string} filePath 要删除的文件
+ * @param {string} [platform] 平台标识（测试注入；默认 process.platform）
+ */
+async function recycleFileNative(filePath, platform = process.platform) {
+  switch (platformTag(platform)) {
+    case 'win32': return recycleFileWindows(filePath)
+    case 'darwin': return recycleFileMac(filePath)
+    case 'linux': return recycleFileLinux(filePath)
+    default: return false
+  }
+}
+
 /**
  * 删除包（契约 §4）。
- * 优先送进 Windows 系统回收站，成功返回 `{ ok:true, recycled:true }`；
- * 非 Windows 或 PowerShell 失败 → 降级为永久删除，返回 `{ ok:true, recycled:false, warning }`（不得静默）。
+ * 优先送进**当前平台的系统回收站**（v0.6.4：Windows 回收站 / macOS 废纸篓 / Linux Trash），
+ * 成功返回 `{ ok:true, recycled:true }`；
+ * 该平台没有回收站（鸿蒙等）或回收站调用失败 → 降级为永久删除，返回 `{ ok:true, recycled:false, warning }`（不得静默）。
  * 同名 `.json` 摘要一并删除（`.pkenc` 与 `.zip` 同一套逻辑）。
  * @param {string} name 包名
  * @param {(filePath: string) => Promise<boolean>} [recycleFn] 回收站实现（测试注入点）
@@ -1325,7 +1482,7 @@ async function deletePack(name, recycleFn = recycleFileNative) {
   await fsp.rm(summaryPath, { force: true })
   const reason = failure
     ? `回收站调用失败（${String(failure?.message || failure)}）`
-    : '当前环境没有 Windows 系统回收站（仅 Windows + PowerShell 5.1 支持）'
+    : `当前平台（${platformTag()}）没有系统回收站（支持 Windows 回收站 / macOS 废纸篓 / Linux Trash）`
   return {
     ok: true,
     recycled: false,
@@ -2588,6 +2745,7 @@ export function createPackApiHandler({ guard, getConnection, recycleFn } = {}) {
       if (rejection) return send(rejection.status, { ok: false, code: rejection.code, error: rejection.message })
 
       // GET /status → 模块概览 + 包列表 + 磁盘占用（契约 v0.5.0 §2 终态，共 6 个字段）
+      // v0.6.4 追加 3 个平台能力字段（platform / trash / filePicker），UI 据此决定回收站文案与「手填路径」入口。
       // v0.4.0 P0：模块计数走 moduleStats —— file 类模块（含 memoryDb）只 stat，
       // 绝不 VACUUM INTO 生成快照（旧实现每开一次设置页就泄漏一个临时快照目录）。
       if (req.method === 'GET' && p === '/status') {
@@ -2603,6 +2761,9 @@ export function createPackApiHandler({ guard, getConnection, recycleFn } = {}) {
           packsDir: PACKS_DIR,
           schemaVersion: SCHEMA_VERSION,
           disk: await packsDiskUsage(),
+          platform: platformTag(),
+          trash: hasSystemTrash(),
+          filePicker: hasSystemFilePicker(),
         })
       }
       // POST /scan → { modules, mode } → 文件清单 + 隐私扫描（契约 §2）
@@ -2976,6 +3137,19 @@ export const __internals = {
   validatePackName,
   packSummaryName,
   recycleFileNative,
+  // ---- v0.6.4：回收站按平台分派（导出给测试；真实使用只走 recycleFileNative） ----
+  platformTag,
+  hasSystemTrash,
+  hasSystemFilePicker,
+  recycleFileWindows,
+  recycleFileMac,
+  recycleFileLinux,
+  buildMacRecycleArgs,
+  escapeAppleScriptString,
+  buildTrashInfo,
+  encodeTrashPath,
+  formatTrashDate,
+  trashDataHome,
   getPackInfo,
   publicManifest,
   importRestore,

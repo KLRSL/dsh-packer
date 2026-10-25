@@ -4,7 +4,7 @@
 >
 > [简体中文](README.md) · [English](README.en.md)
 
-> **v0.6.3** · MIT License · DSH 0.2.x（`>=0.2.0-rc.2 <0.3.0-0`，0.2.1-rc.3 桌面版实测）· Node ≥ 22.19.0
+> **v0.6.4** · MIT License · DSH 0.2.x（`>=0.2.0-rc.2 <0.3.0-0`，0.2.1-rc.3 桌面版实测）· Node ≥ 22.19.0
 
 dsh-packer 是 [DeepSeek Harness](https://github.com/deepseek-ai/dsh)（DSH）的「Agent 配置打包器」插件：把本地 Agent 资产按模块打包成标准 zip，用于两种场景：
 
@@ -32,7 +32,7 @@ dsh-packer 是 [DeepSeek Harness](https://github.com/deepseek-ai/dsh)（DSH）�
 | 选择性恢复 | 恢复前可按**模块**勾选（只恢复 Skills、不动会话），`includeDb` 单独开关控制是否恢复记忆真库 |
 | 恢复前预览 | 导入即算差异：逐文件列出 新增 / 变更 / 相同 / 跳过，并在执行后报告备份目录 |
 | 一键回滚 | `/restore/backups` 列出每次恢复前的备份；`/restore/rollback`（设置页「回滚」按钮）把该次覆盖的文件原样还原 |
-| 包管理 | 查看包内文件清单并**顺带校验 SHA-256**、重命名、删除（删除进 **Windows 系统回收站**，用资源管理器即可找回） |
+| 包管理 | 查看包内文件清单并**顺带校验 SHA-256**、重命名、删除（删除送**当前平台的系统回收站**：Windows 回收站 / macOS 废纸篓 / Linux Trash，均可找回；鸿蒙无回收站，删除前会明确提示不可恢复） |
 | 加密包 | `AES-256-GCM` + `scrypt` 口令加密（`PKENC1` 容器），加密包只在提供口令时才能读清单/恢复；口令错误 fail-closed |
 | 进度与取消 | 打包/恢复都是后台作业（`/jobs/:id`），界面显示 `done/total` 百分比，支持中途取消（文件边界生效，不残留半成品） |
 
@@ -237,20 +237,21 @@ dsh plugin --profile desktop add link:./dsh-packer
 | `DSH_MEMORY_ROOT` | `~/.dsh/memory` | memory 模块数据位置 |
 | `DSH_HOME` | `~/.dsh` | DSH 数据根目录（各模块路径基准） |
 
-设置页按「配置打包器」的任务链组织成一页五个区块：**已有的配置包 → 打包内容 → 打包选项 → 恢复（含差异对比）→ 结果明细**。包信息、完整性校验、改名、删除（进 Windows 回收站）都在包列表行上；恢复前先看差异对比，选模块与策略后执行，完成页给出备份目录与一键撤回。界面中文单语、无图标字符，状态一律文字表达。
+设置页按「配置打包器」的任务链组织成一页五个区块：**已有的配置包 → 打包内容 → 打包选项 → 恢复（含差异对比）→ 结果明细**。包信息、完整性校验、改名、删除（送当前平台的系统回收站，鸿蒙为永久删除并先提示）都在包列表行上；恢复前先看差异对比，选模块与策略后执行，完成页给出备份目录与一键撤回。界面中文单语、无图标字符，状态一律文字表达。
 
 ## 兼容性
 
 - **Node.js** ≥ 22.19.0
-- **多平台通用**：Windows / macOS / Linux / 鸿蒙 共用同一套代码与包格式；两处受限项（回收站、系统文件选择框）与原因见 [docs/platform-support.md](docs/platform-support.md)。
+- **多平台通用**：Windows / macOS / Linux / 鸿蒙 共用同一套代码与包格式；回收站按平台分派（Windows 回收站 / macOS 废纸篓 / Linux Trash），鸿蒙仍有两项受限（回收站、系统文件选择框），原因与矩阵见 [docs/platform-support.md](docs/platform-support.md)。
 - **DSH 版本闸门**：`engines.dsh` = `>=0.2.0-rc.2 <0.3.0-0`（0.2.1-rc.3 桌面版实测）。DSH 的兼容性检查带 `includePrerelease`，预发布号参与范围比较；超出该范围的 DSH 会在安装前被插件管理器拒绝。
 - **peer 依赖**：`@deepseek-ai/cordis` ^4.0.2（插件生命周期基准，由宿主提供）；`@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-session` 范围同 `>=0.2.0-rc.2 <0.3.0-0`，且**未被 `index.mjs` 直接 import**——本插件只使用 `ctx.commands` / `ctx.webServer` / `ctx.slots` 等宿主内建服务，故这两项在 `peerDependenciesMeta` 中标记为 `optional: true`。
-- **无需外部命令**：包由 zip.mjs（node:zlib）直接读写，创建 / 列成员 / 解包都不调用 tar、bsdtar、unzip；任何标准解压工具都能打开生成的包。
+- **无需外部命令**（打包/恢复全程）：包由 zip.mjs（node:zlib）直接读写，创建 / 列成员 / 解包都不调用 tar、bsdtar、unzip；任何标准解压工具都能打开生成的包。（只有「删除进回收站」会调系统命令：Windows PowerShell / macOS osascript；Linux 为纯 Node。）
 
 ## 版本历史
 
 | 版本 | 日期 | 类型 | 要点 |
 | --- | --- | --- | --- |
+| **v0.6.4** | 2026-10-25 | **回收站三平台分派 + 手填路径兜底** | ①**回收站按平台分派**（`recycleFileNative` 契约不变：成功 `true` / 平台不支持 `false` / 调用失败抛错→`deletePack` 降级并回报 warning）：Windows 保持 PowerShell `SendToRecycleBin`；macOS 用 `osascript -e 'tell application "Finder" to delete POSIX file "<path>"'`（引号/反斜杠转义，30s 超时）；Linux 按 freedesktop Trash 规范纯 Node 实现——文件移入 `$XDG_DATA_HOME/Trash/files/<name>`（缺省 `~/.local/share`，同名加 `.1` 后缀），`Trash/info/<name>.trashinfo` 写 `Path=`（URL 编码绝对路径）与 `DeletionDate=`（本地时间 `YYYY-MM-DDThh:mm:ss`）；鸿蒙/其他仍返回 `false`（永久删除 + warning）。②**手填路径**：恢复页「或填包路径」入口保留；`/status` 新增 `platform` / `trash` / `filePicker` 三个平台能力字段，没有系统文件选择框的平台（鸿蒙）上提示「当前平台请直接填写包路径」并以其为主入口，删除确认文案改为如实告知不可恢复；本插件在网页层拿不到宿主机路径，因此任何平台都不渲染点了没反应的选择框按钮。③路径示例按平台给（`/storage/…`、`/home/…`、`/Users/…`）。测试 80 → 87。 |
 | **v0.6.3** | 2026-10-25 | 文档 / 打包范围 | **多平台通用文档随包发布**：`files` 补 `docs`，装好插件后包内自带 `docs/platform-support.md`（Windows / macOS / Linux / 鸿蒙 的支持范围，及两处受限项：回收站、系统文件选择框）；代码与功能无变更。 |
 | **v0.6.2** | 2026-10-25 | 简介 / 文案 | 首段改成「封箱 / 开箱」的说法，桌面版实测版本改 0.2.1-rc.3；功能无变更 |
 | **v0.6.1** | 2026-10-25 | **插件卡片文案重写** | 显示名「配置打包」+ 一句话简介（`locale/en.json`、`locale/zh.json` 的 `meta`），`description` 去掉版本号与功能罗列；功能无变更。 |

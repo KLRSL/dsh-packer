@@ -1,7 +1,7 @@
 {
   "name": "dsh-packer",
   "description": "Packs Skills, sessions, installed plugins and settings into one zip and restores them on a new machine; sanitize or encrypt sensitive content.",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "type": "module",
   "main": "./index.mjs",
   "exports": {

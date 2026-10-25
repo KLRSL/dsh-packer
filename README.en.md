@@ -4,7 +4,7 @@
 >
 > [简体中文](README.md) · [English](README.en.md)
 
-> **v0.6.3** · MIT License · DSH 0.2.x (`>=0.2.0-rc.2 <0.3.0-0`, tested on the 0.2.1-rc.3 desktop app) · Node ≥ 22.19.0
+> **v0.6.4** · MIT License · DSH 0.2.x (`>=0.2.0-rc.2 <0.3.0-0`, tested on the 0.2.1-rc.3 desktop app) · Node ≥ 22.19.0
 
 **dsh-packer** is the Agent Configuration Packer plugin for **DeepSeek Harness (DSH)**: it packs your local Agent assets, module by module, into standard zip archives, for two purposes:
 
@@ -31,7 +31,7 @@ Every module is optional (Skills / Sessions / Profiles / Settings / Presets / Me
 | Selective restore | Pick the **modules** to restore (Skills only, without touching sessions) and toggle `includeDb` separately to restore the memory truth-source database |
 | Per-file diff | Importing a pack immediately computes added / changed / same / skipped, file by file, and the result card reports the backup directory |
 | One-click rollback | `/restore/backups` lists every pre-restore backup; `/restore/rollback` (the UI's "Roll back" button) restores the files that run overwrote |
-| Pack management | Browse a pack's file list with **inline SHA-256 verification**, rename, delete (deleted packs go to the **Windows Recycle Bin**, recoverable in Explorer) |
+| Pack management | Browse a pack's file list with **inline SHA-256 verification**, rename, delete (deleted packs go to the **platform's own trash**: Recycle Bin on Windows, Trash on macOS, freedesktop Trash on Linux — all recoverable; HarmonyOS has none, so the UI warns that deletion is permanent) |
 | Encrypted packs | `AES-256-GCM` with a `scrypt`-derived key (`PKENC1` container); manifests and restores require the passphrase, and a wrong passphrase fails closed |
 | Progress & cancel | Packing and restoring run as background jobs (`/jobs/:id`) with a `done/total` percentage in the UI and a cancel button (honoured at file boundaries, no half-written zip) |
 
@@ -228,19 +228,21 @@ Pack verification no longer has its own command: the settings page's "Browse" re
 | `DSH_MEMORY_ROOT` | `~/.dsh/memory` | Location of the `memory` module data |
 | `DSH_HOME` | `~/.dsh` | DSH data root (base for all module paths) |
 
-The Settings page is one page in five blocks, following the packer's task chain: **existing packs → contents to pack → pack options → restore (with per-item diff) → result details**. Pack info, integrity verification, rename and delete live on the pack row (delete goes to the Windows Recycle Bin); restore shows the diff first, then module selection and strategy, and the result block reports the backup directory with a one-click rollback. Chinese-only copy, no icon characters, statuses in words.
+The Settings page is one page in five blocks, following the packer's task chain: **existing packs → contents to pack → pack options → restore (with per-item diff) → result details**. Pack info, integrity verification, rename and delete live on the pack row (delete sends the pack to the platform's own trash — on HarmonyOS it is permanent and announced first); restore shows the diff first, then module selection and strategy, and the result block reports the backup directory with a one-click rollback. Chinese-only copy, no icon characters, statuses in words.
 
 ## Compatibility
 
 - **Node.js** ≥ 22.19.0
+- **Cross-platform**: Windows / macOS / Linux / HarmonyOS share one code base and one pack format. Trash is dispatched per platform (Windows Recycle Bin / macOS Trash / Linux freedesktop Trash); HarmonyOS still has two limits (trash and system file picker) — see [docs/platform-support.md](docs/platform-support.md).
 - **DSH version gate**: `engines.dsh` = `>=0.2.0-rc.2 <0.3.0-0` (tested on the 0.2.1-rc.3 desktop app). DSH evaluates compatibility with `includePrerelease`, so prerelease identifiers participate in range checks; DSH versions outside this range are refused by the plugin manager before install.
 - **Peer dependencies**: `@deepseek-ai/cordis` ^4.0.2 (plugin lifecycle baseline, provided by the host); `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-session` share the `>=0.2.0-rc.2 <0.3.0-0` range and are **not imported by `index.mjs`** — the plugin only uses host services such as `ctx.commands` / `ctx.webServer` / `ctx.slots`, so both are marked `optional: true` in `peerDependenciesMeta`.
-- **No external commands**: packs are read and written directly by zip.mjs (node:zlib) — creating, listing and extracting never call tar, bsdtar or unzip, and any standard unzip tool can open the produced packs.
+- **No external commands for packing**: packs are read and written directly by zip.mjs (node:zlib) — creating, listing and extracting never call tar, bsdtar or unzip, and any standard unzip tool can open the produced packs. (Only the trash feature shells out to OS commands: PowerShell on Windows, osascript on macOS; Linux uses pure Node.)
 
 ## Version history
 
 | Version | Date | Type | Highlights |
 | --- | --- | --- | --- |
+| **v0.6.4** | 2026-10-25 | **Per-platform trash + manual path fallback** | (1) **Trash is dispatched per platform** (`recycleFileNative` contract unchanged: `true` on success, `false` when the platform has none, throw on failure → `deletePack` degrades and reports a warning): Windows keeps PowerShell `SendToRecycleBin`; macOS uses `osascript -e 'tell application "Finder" to delete POSIX file "<path>"'` (quote/backslash escaping, 30s timeout); Linux implements the freedesktop Trash spec in pure Node — the file moves to `$XDG_DATA_HOME/Trash/files/<name>` (defaults to `~/.local/share`, `.1` suffix on collisions) and `Trash/info/<name>.trashinfo` records `Path=` (URL-encoded absolute path) plus `DeletionDate=` (local time `YYYY-MM-DDThh:mm:ss`); HarmonyOS and everything else still return `false` (permanent delete + warning). (2) **Manual path**: the restore page keeps its "or type a pack path" entry; `/status` gains three platform capability fields (`platform` / `trash` / `filePicker`), so platforms without a system file picker (HarmonyOS) show "当前平台请直接填写包路径" and treat manual input as the primary entry, while the delete confirmation tells the truth (not recoverable). The web layer cannot obtain host paths, so no platform renders a dead picker button. (3) Path examples are platform-specific (`/storage/…`, `/home/…`, `/Users/…`). Tests 80 → 87. |
 | **v0.6.3** | 2026-10-25 | Docs / pack scope | **Cross-platform docs now ship inside the package**: `files` gains `docs`, so an installed plugin carries `docs/platform-support.md` (support matrix for Windows / macOS / Linux / HarmonyOS, plus the two limits: Recycle Bin and system file picker). No code or behavior change. |
 | **v0.6.2** | 2026-10-25 | Intro / copy | Rewrote the intro line; tested desktop version is now 0.2.1-rc.3. No functional change |
 | **v0.6.1** | 2026-10-25 | **Plugin card copy rewritten** | Localized title ("Config Packer") and one-line summary via `locale/en.json` / `locale/zh.json` `meta`; `description` no longer embeds the version or lists features. No functional changes. |

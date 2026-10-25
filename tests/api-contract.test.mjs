@@ -189,8 +189,14 @@ test('/status：不产生 SQLite 快照（memoryDb 只 stat），且返回契约
   assert.equal(typeof data.packsDir, 'string')
   assert.equal(data.packsDir, fakePacks)
   assert.equal(data.schemaVersion, 1)
-  // v0.5.0 §2 字段终态：只有这 6 个键，回收站/保留策略/自动备份字段全部删掉
-  assert.deepEqual(Object.keys(data).sort(), ['disk', 'modules', 'ok', 'packs', 'packsDir', 'schemaVersion'])
+  // v0.5.0 §2 字段终态：6 个键；v0.6.4 追加 3 个平台能力字段（platform / trash / filePicker）
+  assert.deepEqual(Object.keys(data).sort(), ['disk', 'filePicker', 'modules', 'ok', 'packs', 'packsDir', 'platform', 'schemaVersion', 'trash'])
+  // v0.6.4：能力字段必须与真实平台一致（UI 的回收站文案与「手填路径」入口都依赖它）
+  assert.equal(data.platform, I.platformTag(), 'platform 必须是归一化后的 process.platform')
+  assert.equal(data.trash, I.hasSystemTrash(), 'trash = 当前平台是否有系统回收站')
+  assert.equal(data.filePicker, I.hasSystemFilePicker(), 'filePicker = 当前平台宿主是否有系统文件选择框')
+  assert.equal(typeof data.trash, 'boolean')
+  assert.equal(typeof data.filePicker, 'boolean')
   assert.deepEqual(data.disk, { packsBytes: 0 })
   assert.equal(data.trashCount, undefined, 'v0.5.0：/status 不再有 trashCount')
   assert.equal(data.retention, undefined, 'v0.5.0：/status 不再有 retention')
